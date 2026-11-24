@@ -1,6 +1,8 @@
 import os
+import socket
 
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+socket.setdefaulttimeout(20)
 
 import io
 import base64
@@ -116,23 +118,38 @@ def get_user_credentials() -> Credentials | None:
 # 2. HERRAMIENTAS AUTÓNOMAS DEL AGENTE (AISLADAS POR SESIÓN)
 # ==============================================================================
 def buscar_internet(consulta: str) -> str:
-    """Busca información actualizada en internet y devuelve títulos, enlaces y resúmenes."""
+    """Busca información actualizada en internet usando Google Search."""
+    try:
+        c = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+        res = c.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=f"Busca información actualizada, concreta y con fuentes sobre: {consulta}",
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.2,
+            ),
+        )
+        if res.text:
+            return res.text
+    except Exception:
+        pass
+
     try:
         resultados = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(consulta, max_results=5):
+        with DDGS(timeout=8) as ddgs:
+            for r in ddgs.text(consulta, max_results=4):
                 resultados.append(
                     f"- {r.get('title')}: {r.get('body')} (URL: {r.get('href')})"
                 )
         return "\n".join(resultados) if resultados else "No se encontraron resultados."
     except Exception as e:
-        return f"Error en búsqueda web: {e}"
+        return f"No se pudo completar la búsqueda web: {e}"
 
 
 def leer_pagina_web(url: str) -> str:
     """Extrae el texto principal de una URL pública para analizar artículos o documentos web."""
     try:
-        resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "nav", "footer"]):
@@ -171,15 +188,16 @@ def buscar_videos_youtube(tema: str, max_resultados: int = 5) -> str:
         pass
 
     try:
-        resultados = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(f"site:youtube.com/watch {tema}", max_results=limite):
-                resultados.append(f"- **{r.get('title')}** -> {r.get('href')}")
-        return (
-            "\n".join(resultados)
-            if resultados
-            else "No se encontraron videos en YouTube para ese tema."
+        c = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+        res = c.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=f"Busca {limite} videos reales en YouTube sobre '{tema}' y devuelve sus títulos, canales y enlaces https://www.youtube.com/watch?v=...",
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.2,
+            ),
         )
+        return res.text or "No se encontraron videos en YouTube para ese tema."
     except Exception as e:
         return f"Error al buscar videos en YouTube: {e}"
 
@@ -334,13 +352,13 @@ def planificar_ruta_google_maps(
             "https://nominatim.openstreetmap.org/search",
             params={"q": origen, "format": "json", "limit": 1},
             headers=headers,
-            timeout=8,
+            timeout=6,
         ).json()
         g2 = requests.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": destino, "format": "json", "limit": 1},
             headers=headers,
-            timeout=8,
+            timeout=6,
         ).json()
         if g1 and g2:
             lon1, lat1 = g1[0]["lon"], g1[0]["lat"]
@@ -349,7 +367,7 @@ def planificar_ruta_google_maps(
             ruta = requests.get(
                 f"https://router.project-osrm.org/route/v1/{perfil}/{lon1},{lat1};{lon2},{lat2}",
                 params={"overview": "false"},
-                timeout=8,
+                timeout=6,
             ).json()
             if ruta.get("routes"):
                 dist_km = round(ruta["routes"][0]["distance"] / 1000, 2)
@@ -802,6 +820,9 @@ if prompt_final:
                         system_instruction=get_system_instruction(),
                         tools=TOOLS_LIST,
                         temperature=0.4,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            maximum_remote_calls=6
+                        ),
                     ),
                 )
                 response = chat.send_message(prompt_final)
@@ -813,3 +834,4 @@ if prompt_final:
             st.session_state["messages"].append(
                 {"role": "assistant", "content": texto_respuesta}
             )
+            st.rerun()
