@@ -3,7 +3,7 @@ import re
 import html
 import time
 import json
-import smtplib
+import base64
 import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -22,10 +22,13 @@ from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from google import genai
 from google.genai import types
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from duckduckgo_search import DDGS
 
 st.set_page_config(
-    page_title="AGENTE IA ULIMA | Google Workspace & ODS 4",
+    page_title="AGENTE IA ULIMA | Google Workspace OAuth2 & ODS 4",
     page_icon="🎓",
     layout="wide"
 )
@@ -34,7 +37,13 @@ ZONA_LIMA = timezone(timedelta(hours=-5))
 ARCHIVO_WORD_PATH = "/tmp/Documento_ULima_ODS4.docx"
 ARCHIVO_PPT_PATH = "/tmp/Presentacion_ULima_ODS4.pptx"
 ARCHIVO_EXCEL_PATH = "/tmp/Hoja_Calculo_ULima_ODS4.xlsx"
-ARCHIVO_ICS_PATH = "/tmp/Evento_ULima_ODS4.ics"
+
+SCOPES_GOOGLE = [
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/drive.file"
+]
 
 CARRERAS_ULIMA = [
     "Administración",
@@ -61,19 +70,22 @@ def ahora_lima() -> datetime:
     return datetime.now(ZONA_LIMA)
 
 
-def obtener_secreto(clave: str) -> str:
+def obtener_secreto(clave: str, default: str = "") -> str:
     try:
-        return str(st.secrets.get(clave, "")).strip()
+        val = st.secrets.get(clave, "")
+        return str(val).strip() if val else default
     except Exception:
-        return os.environ.get(clave, "").strip()
+        return os.environ.get(clave, default).strip()
 
 
 def inicializar_estado():
     defaults = {
-        "conectado": False,
         "api_key": obtener_secreto("GEMINI_API_KEY"),
-        "gmail_user": obtener_secreto("GMAIL_USER"),
-        "gmail_pass": obtener_secreto("GMAIL_APP_PASSWORD"),
+        "client_id": obtener_secreto("GOOGLE_CLIENT_ID"),
+        "client_secret": obtener_secreto("GOOGLE_CLIENT_SECRET"),
+        "redirect_uri": obtener_secreto("REDIRECT_URI", "https://agente-autonomo-ods4.streamlit.app"),
+        "google_creds": None,
+        "google_email": "",
         "modelo_preferido": "gemini-3.8-flash"
     }
     for k, v in defaults.items():
@@ -84,14 +96,60 @@ def inicializar_estado():
 inicializar_estado()
 
 
+def crear_flujo_oauth(client_id: str, client_secret: str, redirect_uri: str) -> Flow:
+    client_config = {
+        "web": {
+            "client_id": client_id.strip(),
+            "client_secret": client_secret.strip(),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [redirect_uri.strip()]
+        }
+    }
+    flow = Flow.from_client_config(
+        client_config,
+        scopes=SCOPES_GOOGLE,
+        redirect_uri=redirect_uri.strip()
+    )
+    flow.autogenerate_code_verifier = False
+    return flow
+
+
+# Capturar retorno automático desde Google OAuth (?code=...)
+codigo_oauth = st.query_params.get("code")
+if codigo_oauth and st.session_state["google_creds"] is None:
+    if st.session_state["client_id"] and st.session_state["client_secret"]:
+        try:
+            flujo = crear_flujo_oauth(
+                st.session_state["client_id"],
+                st.session_state["client_secret"],
+                st.session_state["redirect_uri"]
+            )
+            flujo.code_verifier = None
+            flujo.fetch_token(code=codigo_oauth)
+            creds = flujo.credentials
+            st.session_state["google_creds"] = creds
+
+            # Obtener correo real del usuario autenticado
+            gmail_srv = build("gmail", "v1", credentials=creds)
+            perfil_gmail = gmail_srv.users().getProfile(userId="me").execute()
+            st.session_state["google_email"] = perfil_gmail.get("emailAddress", "Cuenta Google Conectada")
+
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e_oauth:
+            st.query_params.clear()
+            st.error(f"No se pudo completar el inicio de sesión con Google: {e_oauth}")
+
+
 # ==============================================================================
-# HERRAMIENTAS DE NAVEGACIÓN WEB EN VIVO
+# NAVEGACIÓN WEB EN TIEMPO REAL
 # ==============================================================================
 def leer_pagina_web(url: str) -> str:
     try:
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AgenteIAULima/1.0)"}
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AgenteIAULima/2.0)"}
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read().decode("utf-8", errors="ignore")
@@ -125,10 +183,10 @@ def navegar_internet_vivo(consulta: str) -> tuple[str, str]:
                     urls_leidas += 1
             bloques.append(f"- {titulo}: {resumen} (URL: {enlace}){extra_web}")
 
-        log = f"[{hora}] 🌐 Navegador Web en vivo: {len(resultados)} fuentes halladas ({urls_leidas} páginas leídas a fondo)"
+        log = f"[{hora}] 🌐 Navegador Web en vivo: {len(resultados)} fuentes halladas ({urls_leidas} páginas leídas)"
         return "\n".join(bloques), log
     except Exception:
-        return "Estándares de educación superior UNESCO ODS 4 (ULima).", f"[{hora}] 🌐 Navegador Web: modo respaldo académico activo"
+        return "Estándares de educación superior UNESCO ODS 4 (ULima).", f"[{hora}] 🌐 Navegador Web: respaldo académico activo"
 
 
 def buscar_wikipedia_vivo(concepto: str) -> tuple[str, str]:
@@ -136,7 +194,7 @@ def buscar_wikipedia_vivo(concepto: str) -> tuple[str, str]:
     try:
         termino = urllib.parse.quote(concepto.strip().split()[0])
         url = f"https://es.wikipedia.org/api/rest_v1/page/summary/{termino}"
-        req = urllib.request.Request(url, headers={"User-Agent": "AgenteULimaODS4/8.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "AgenteULimaODS4/10.0"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             datos = json.loads(resp.read().decode("utf-8"))
         extracto = datos.get("extract", "")
@@ -148,7 +206,7 @@ def buscar_wikipedia_vivo(concepto: str) -> tuple[str, str]:
 
 
 # ==============================================================================
-# CONEXIÓN BLINDADA CON GOOGLE GEMINI
+# CONEXIÓN CON GEMINI
 # ==============================================================================
 def obtener_modelos_activos(client: genai.Client, modelo_preferido: str) -> list[str]:
     prioridad = [modelo_preferido, "gemini-3.8-flash", "gemini-3.8-pro"]
@@ -198,7 +256,7 @@ def llamar_gemini_blindado(client: genai.Client, prompt: str, modelos_activos: l
 
 
 # ==============================================================================
-# GENERADORES DE ARCHIVOS: WORD (.DOCX), POWERPOINT (.PPTX), EXCEL (.XLSX) Y CALENDAR
+# GENERADORES DE ARCHIVOS LOCALES + SUBIDA NATIVA A GOOGLE WORKSPACE
 # ==============================================================================
 def crear_word_archivo(titulo: str, subtitulo: str, contenido_md: str) -> str:
     hora = ahora_lima().strftime("%H:%M:%S")
@@ -221,7 +279,7 @@ def crear_word_archivo(titulo: str, subtitulo: str, contenido_md: str) -> str:
             doc.add_paragraph(limpia.replace("**", ""))
 
     doc.save(ARCHIVO_WORD_PATH)
-    return f"[{hora}] 📄 Documento Word (.docx) creado"
+    return f"[{hora}] 📄 Archivo Word (.docx) generado"
 
 
 def crear_ppt_archivo(titulo_portada: str, subtitulo: str, contenido_md: str) -> str:
@@ -230,7 +288,6 @@ def crear_ppt_archivo(titulo_portada: str, subtitulo: str, contenido_md: str) ->
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
-    # Portada institucional ULima
     slide_portada = prs.slides.add_slide(prs.slide_layouts[0])
     bg = slide_portada.background
     fill = bg.fill
@@ -250,7 +307,6 @@ def crear_ppt_archivo(titulo_portada: str, subtitulo: str, contenido_md: str) ->
             p.font.color.rgb = RGBColor(244, 244, 245)
             p.font.size = Pt(18)
 
-    # Parsear secciones en diapositivas
     secciones = []
     titulo_actual = "Resumen Ejecutivo y Enfoque ODS 4"
     puntos_actuales = []
@@ -292,7 +348,7 @@ def crear_ppt_archivo(titulo_portada: str, subtitulo: str, contenido_md: str) ->
                 p.space_after = Pt(10)
 
     prs.save(ARCHIVO_PPT_PATH)
-    return f"[{hora}] 📊 Presentación PowerPoint (.pptx) creada ({min(len(secciones), 8) + 1} diapositivas)"
+    return f"[{hora}] 📊 Archivo PowerPoint (.pptx) generado ({min(len(secciones), 8) + 1} diapositivas)"
 
 
 def crear_excel_archivo(titulo: str, subtitulo: str, contenido_md: str, fecha_evento: datetime) -> str:
@@ -363,67 +419,115 @@ def crear_excel_archivo(titulo: str, subtitulo: str, contenido_md: str, fecha_ev
             hoja.column_dimensions[col_letter].width = max(max_len + 4, 16)
 
     wb.save(ARCHIVO_EXCEL_PATH)
-    return f"[{hora}] 📈 Libro de Excel (.xlsx) creado (3 hojas)"
+    return f"[{hora}] 📈 Archivo Excel (.xlsx) generado (3 hojas)"
 
 
-def construir_evento_calendar(titulo_evento: str, inicio_dt: datetime, duracion_min: int, descripcion: str, correo_asistente: str) -> tuple[str, str, str, datetime]:
+def subir_a_google_workspace(creds, tema: str) -> tuple[dict, list[str]]:
+    """Sube y convierte los archivos directo en Google Docs, Google Slides y Google Sheets en Drive."""
+    logs = []
+    enlaces = {"docs": "", "slides": "", "sheets": ""}
     hora = ahora_lima().strftime("%H:%M:%S")
+    try:
+        drive_service = build("drive", "v3", credentials=creds)
+
+        # 1. Google Docs
+        if os.path.exists(ARCHIVO_WORD_PATH):
+            meta_doc = {
+                "name": f"ULima ODS 4 - {tema}",
+                "mimeType": "application/vnd.google-apps.document"
+            }
+            media_doc = MediaFileUpload(
+                ARCHIVO_WORD_PATH,
+                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            res_doc = drive_service.files().create(body=meta_doc, media_body=media_doc, fields="webViewLink").execute()
+            enlaces["docs"] = res_doc.get("webViewLink", "")
+            logs.append(f"[{hora}] 🟦 Google Docs creado directamente en tu Google Drive")
+
+        # 2. Google Slides
+        if os.path.exists(ARCHIVO_PPT_PATH):
+            meta_ppt = {
+                "name": f"Presentación ULima ODS 4 - {tema}",
+                "mimeType": "application/vnd.google-apps.presentation"
+            }
+            media_ppt = MediaFileUpload(
+                ARCHIVO_PPT_PATH,
+                mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            )
+            res_ppt = drive_service.files().create(body=meta_ppt, media_body=media_ppt, fields="webViewLink").execute()
+            enlaces["slides"] = res_ppt.get("webViewLink", "")
+            logs.append(f"[{hora}] 🟨 Google Slides creado directamente en tu Google Drive")
+
+        # 3. Google Sheets
+        if os.path.exists(ARCHIVO_EXCEL_PATH):
+            meta_xls = {
+                "name": f"Plan ULima ODS 4 - {tema}",
+                "mimeType": "application/vnd.google-apps.spreadsheet"
+            }
+            media_xls = MediaFileUpload(
+                ARCHIVO_EXCEL_PATH,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            res_xls = drive_service.files().create(body=meta_xls, media_body=media_xls, fields="webViewLink").execute()
+            enlaces["sheets"] = res_xls.get("webViewLink", "")
+            logs.append(f"[{hora}] 🟩 Google Sheets creado directamente en tu Google Drive")
+
+    except Exception as e:
+        logs.append(f"[{hora}] ⚠️ Aviso al subir a Google Drive: {str(e)[:120]}")
+
+    return enlaces, logs
+
+
+def insertar_evento_real_google_calendar(creds, titulo_evento: str, inicio_dt: datetime, duracion_min: int, descripcion: str) -> tuple[str, str]:
+    """Inserta el evento directamente en el calendario principal del usuario vía Google Calendar API."""
+    hora = ahora_lima().strftime("%H:%M:%S")
+    if inicio_dt.tzinfo is None:
+        inicio_dt = inicio_dt.replace(tzinfo=ZONA_LIMA)
     fin_dt = inicio_dt + timedelta(minutes=duracion_min)
-    uid_evento = f"ulima-ods4-{int(time.time())}@ulima.edu.pe"
-    dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-    ics_texto = (
-        "BEGIN:VCALENDAR\n"
-        "VERSION:2.0\n"
-        "PRODID:-//Agente IA ULima ODS 4//Google Workspace//ES\n"
-        "METHOD:REQUEST\n"
-        "BEGIN:VEVENT\n"
-        f"UID:{uid_evento}\n"
-        f"DTSTAMP:{dtstamp}\n"
-        f"DTSTART:{inicio_dt.strftime('%Y%m%dT%H%M%S')}\n"
-        f"DTEND:{fin_dt.strftime('%Y%m%dT%H%M%S')}\n"
-        f"ORGANIZER;CN=Agente IA ULima:mailto:{correo_asistente}\n"
-        f"ATTENDEE;RSVP=TRUE:mailto:{correo_asistente}\n"
-        f"SUMMARY:{titulo_evento}\n"
-        f"DESCRIPTION:{descripcion}\n"
-        "STATUS:CONFIRMED\n"
-        "END:VEVENT\n"
-        "END:VCALENDAR\n"
-    )
-    with open(ARCHIVO_ICS_PATH, "w", encoding="utf-8") as f:
-        f.write(ics_texto)
-
-    titulo_q = urllib.parse.quote(titulo_evento)
-    detalles_q = urllib.parse.quote(descripcion)
-    fechas_q = f"{inicio_dt.strftime('%Y%m%dT%H%M%S')}/{fin_dt.strftime('%Y%m%dT%H%M%S')}"
-    url_gcal = f"https://calendar.google.com/calendar/render?action=TEMPLATE&text={titulo_q}&dates={fechas_q}&details={detalles_q}"
-
-    log = f"[{hora}] 📅 Google Calendar agendado: '{titulo_evento}' ({inicio_dt.strftime('%d/%m/%Y %H:%M')})"
-    return log, url_gcal, ics_texto, inicio_dt
-
-
-def enviar_gmail_completo(remitente: str, clave_app: str, destinatario: str, asunto: str, contenido: str, ics_texto: str, info_fecha: str) -> tuple[bool, str]:
-    hora = ahora_lima().strftime("%H:%M:%S")
-    remitente = remitente.strip()
-    clave_app = clave_app.replace(" ", "").strip()
-    destinatario = destinatario.strip() or remitente
-
-    if not remitente or not clave_app:
-        return False, f"[{hora}] ⚠️ Gmail: ingresa tu correo y contraseña de aplicación para enviar automáticamente"
 
     try:
-        msg = MIMEMultipart("mixed")
-        msg["From"] = remitente
-        msg["To"] = destinatario
+        cal_service = build("calendar", "v3", credentials=creds)
+        evento_body = {
+            "summary": titulo_evento,
+            "description": descripcion,
+            "start": {"dateTime": inicio_dt.isoformat(), "timeZone": "America/Lima"},
+            "end": {"dateTime": fin_dt.isoformat(), "timeZone": "America/Lima"},
+            "reminders": {
+                "useDefault": False,
+                "overrides": [{"method": "popup", "minutes": 30}]
+            }
+        }
+        creado = cal_service.events().insert(calendarId="primary", body=evento_body).execute()
+        link_evento = creado.get("htmlLink", "https://calendar.google.com")
+        return link_evento, f"[{hora}] 📅 EVENTO AGENDADO EN TU GOOGLE CALENDAR: '{titulo_evento}' ({inicio_dt.strftime('%d/%m/%Y %H:%M')})"
+    except Exception as e:
+        return "https://calendar.google.com", f"[{hora}] ⚠️ Error en Google Calendar API: {str(e)[:120]}"
+
+
+def enviar_gmail_real_api(creds, destinatario: str, asunto: str, contenido: str, enlaces_workspace: dict, link_calendar: str) -> tuple[bool, str]:
+    """Envía un correo real directamente desde la cuenta Gmail autenticada por OAuth2."""
+    hora = ahora_lima().strftime("%H:%M:%S")
+    try:
+        gmail_service = build("gmail", "v1", credentials=creds)
+        msg = MIMEMultipart()
+        msg["To"] = destinatario.strip()
         msg["Subject"] = asunto
+
+        bloque_links = ""
+        if enlaces_workspace.get("docs"):
+            bloque_links += f"• Google Docs: {enlaces_workspace['docs']}\n"
+        if enlaces_workspace.get("slides"):
+            bloque_links += f"• Google Slides: {enlaces_workspace['slides']}\n"
+        if enlaces_workspace.get("sheets"):
+            bloque_links += f"• Google Sheets: {enlaces_workspace['sheets']}\n"
+        if link_calendar:
+            bloque_links += f"• Evento Google Calendar: {link_calendar}\n"
 
         cuerpo = (
             "¡Hola!\n\n"
-            "Tu Agente IA Autónomo ULima (ODS 4) ha ejecutado tu solicitud y conectado tus herramientas:\n"
-            f"📅 Evento programado en Google Calendar: {info_fecha}\n"
-            "📄 Documento Word (.docx) adjunto\n"
-            "📊 Presentación PowerPoint (.pptx) adjunta\n"
-            "📈 Libro Excel (.xlsx) adjunto\n\n"
+            "El Agente IA Autónomo ULima (ODS 4) ha generado y sincronizado tus recursos en Google Workspace:\n\n"
+            f"{bloque_links}\n"
+            "También se adjuntan las copias descargables en Word (.docx), PowerPoint (.pptx) y Excel (.xlsx).\n\n"
             "------------------------------------------------------------\n"
             f"{contenido[:3500]}\n"
             "------------------------------------------------------------\n"
@@ -431,17 +535,11 @@ def enviar_gmail_completo(remitente: str, clave_app: str, destinatario: str, asu
         )
         msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
 
-        if ics_texto:
-            parte_cal = MIMEText(ics_texto, "calendar; method=REQUEST", "utf-8")
-            msg.attach(parte_cal)
-
-        adjuntos = [
+        for ruta, nombre in [
             (ARCHIVO_WORD_PATH, "Documento_ULima_ODS4.docx"),
             (ARCHIVO_PPT_PATH, "Presentacion_ULima_ODS4.pptx"),
-            (ARCHIVO_EXCEL_PATH, "Hoja_Calculo_ULima_ODS4.xlsx"),
-            (ARCHIVO_ICS_PATH, "Evento_ULima_ODS4.ics")
-        ]
-        for ruta, nombre in adjuntos:
+            (ARCHIVO_EXCEL_PATH, "Hoja_Calculo_ULima_ODS4.xlsx")
+        ]:
             if os.path.exists(ruta):
                 with open(ruta, "rb") as f:
                     adj = MIMEBase("application", "octet-stream")
@@ -450,122 +548,110 @@ def enviar_gmail_completo(remitente: str, clave_app: str, destinatario: str, asu
                 adj.add_header("Content-Disposition", f"attachment; filename={nombre}")
                 msg.attach(adj)
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=12) as server:
-            server.login(remitente, clave_app)
-            server.send_message(msg)
-
-        return True, f"[{hora}] ✅ Gmail enviado a '{destinatario}' con Word + PPT + Excel + Invitación Calendar"
-    except smtplib.SMTPAuthenticationError:
-        return False, (
-            f"[{hora}] ❌ Google rechazó la contraseña: debes usar una 'Contraseña de aplicación' de 16 letras "
-            "(myaccount.google.com/apppasswords)."
-        )
+        raw_bytes = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+        gmail_service.users().messages().send(userId="me", body={"raw": raw_bytes}).execute()
+        return True, f"[{hora}] 📧 GMAIL ENVIADO REALMENTE a '{destinatario}' vía Gmail API oficial"
     except Exception as e:
-        return False, f"[{hora}] ❌ Error al enviar Gmail: {str(e)}"
+        return False, f"[{hora}] ⚠️ Error al enviar por Gmail API: {str(e)[:140]}"
 
 
 # ==============================================================================
-# PANTALLA 0: ACCESO INICIAL (API KEY + CORREO Y CONTRASEÑA GOOGLE)
+# PANTALLA 0: INICIO DE SESIÓN OFICIAL CON GOOGLE (OAUTH 2.0)
 # ==============================================================================
-if not st.session_state["conectado"]:
+if st.session_state["google_creds"] is None:
     st.markdown("<br>", unsafe_allow_html=True)
-    _, col_centro, _ = st.columns([1, 1.5, 1])
+    _, col_centro, _ = st.columns([1, 1.6, 1])
 
     with col_centro:
         st.markdown("## 🎓 Agente IA Autónomo — Universidad de Lima")
-        st.caption("Conecta tu clave de IA y tu cuenta de Google para que el agente navegue en internet, agende en Calendar, cree Docs/PPT/Excel y envíe Gmails.")
+        st.caption("Conecta tu cuenta oficial de Google (OAuth 2.0) para que la IA acceda a tu Gmail, Google Calendar, Google Docs, Slides y Sheets.")
 
-        with st.form("login_agente_ulima"):
-            api_in = st.text_input(
-                "🔑 Google AI Studio API Key (Cerebro IA)",
-                value=st.session_state["api_key"],
-                type="password",
-                placeholder="AIzaSy..."
-            )
-            correo_in = st.text_input(
-                "📧 Correo de Google (Gmail & Calendar)",
-                value=st.session_state["gmail_user"],
-                placeholder="tucorreo@gmail.com"
-            )
-            pass_in = st.text_input(
-                "🔐 Contraseña de aplicación de Google (16 letras)",
-                value=st.session_state["gmail_pass"],
-                type="password",
-                placeholder="••••••••••••••••"
-            )
-            modelo_in = st.selectbox(
-                "⚡ Motor Gemini",
-                ["gemini-3.8-flash", "gemini-3.8-pro"],
-                index=0
-            )
+        api_in = st.text_input(
+            "🔑 Google AI Studio API Key (Gemini)",
+            value=st.session_state["api_key"],
+            type="password",
+            placeholder="AIzaSy..."
+        )
+        st.session_state["api_key"] = api_in.strip()
 
-            btn_entrar = st.form_submit_button("🚀 Conectar e Iniciar Agente IA", type="primary", use_container_width=True)
+        with st.expander("⚙️ Credenciales OAuth de Google Cloud (1 sola vez)", expanded=not bool(st.session_state["client_id"] and st.session_state["client_secret"])):
+            cid_in = st.text_input("Google Client ID", value=st.session_state["client_id"], placeholder="123456-xxxx.apps.googleusercontent.com")
+            csec_in = st.text_input("Google Client Secret", value=st.session_state["client_secret"], type="password", placeholder="GOCSPX-...")
+            ruri_in = st.text_input("Redirect URI (URL exacta de tu app)", value=st.session_state["redirect_uri"])
+            st.session_state["client_id"] = cid_in.strip()
+            st.session_state["client_secret"] = csec_in.strip()
+            st.session_state["redirect_uri"] = ruri_in.strip()
 
-            if btn_entrar:
-                if not api_in.strip():
-                    st.error("⚠️ Ingresa tu Google AI Studio API Key (`AIza...`) para activar la inteligencia artificial.")
-                else:
-                    st.session_state["api_key"] = api_in.strip()
-                    st.session_state["gmail_user"] = correo_in.strip()
-                    st.session_state["gmail_pass"] = pass_in.strip()
-                    st.session_state["modelo_preferido"] = modelo_in
-                    st.session_state["conectado"] = True
-                    st.rerun()
+        st.divider()
 
-        with st.expander("¿Cómo obtener tu contraseña de acceso de Google (16 letras)?"):
-            st.markdown(
-                "1. Entra a **myaccount.google.com/apppasswords** con tu cuenta Google.\n"
-                "2. Escribe `Agente ULima` y haz clic en **Crear**.\n"
-                "3. Copia las **16 letras** y pégalas arriba para habilitar envíos reales por Gmail y Google Calendar."
-            )
+        if st.session_state["api_key"] and st.session_state["client_id"] and st.session_state["client_secret"]:
+            try:
+                flujo_login = crear_flujo_oauth(
+                    st.session_state["client_id"],
+                    st.session_state["client_secret"],
+                    st.session_state["redirect_uri"]
+                )
+                url_autorizacion, _ = flujo_login.authorization_url(
+                    prompt="consent",
+                    access_type="offline",
+                    include_granted_scopes="true"
+                )
+                st.link_button(
+                    "🔵 Continuar con Google (Conectar Gmail, Calendar y Drive)",
+                    url_autorizacion,
+                    type="primary",
+                    use_container_width=True
+                )
+            except Exception as err_cfg:
+                st.error(f"Revisa el Client ID o Redirect URI: {err_cfg}")
+        else:
+            st.info("Completa tu **Gemini API Key**, **Client ID** y **Client Secret** arriba para activar el botón oficial de **Continuar con Google**.")
 
     st.stop()
 
 
 # ==============================================================================
-# WORKSPACE AUTÓNOMO ULIMA (CONECTADO A TODO)
+# WORKSPACE AUTÓNOMO ULIMA (AUTENTICADO CON GOOGLE OAUTH 2.0)
 # ==============================================================================
 with st.sidebar:
-    st.title("⚙️ Centro de Control")
-    st.success("🟢 Gemini IA Conectado")
-    if st.session_state["gmail_user"] and st.session_state["gmail_pass"]:
-        st.success(f"🟢 Google: {st.session_state['gmail_user']}")
-    else:
-        st.warning("🟡 Gmail sin contraseña (solo descargas)")
+    st.title("⚙️ Sesión Google Activa")
+    st.success(f"🟢 {st.session_state['google_email']}")
+    st.caption("Permisos activos: Gmail + Calendar + Drive (Docs/Slides/Sheets)")
 
     st.divider()
     correo_destino_ui = st.text_input(
-        "📩 Correo destino por defecto:",
-        value=st.session_state["gmail_user"],
-        placeholder="alumno@aloe.ulima.edu.pe"
+        "📩 Enviar correos a:",
+        value=st.session_state["google_email"],
+        help="Por defecto se envía a tu propio Gmail conectado."
     )
     fecha_base_ui = st.date_input(
-        "📅 Fecha base Calendar",
+        "📅 Fecha por defecto Calendar",
         value=(ahora_lima() + timedelta(days=1)).date()
     )
     hora_base_ui = st.time_input(
-        "⏰ Hora base Calendar",
+        "⏰ Hora por defecto Calendar",
         value=datetime.strptime("18:00", "%H:%M").time()
     )
 
     st.divider()
-    st.markdown("**Capacidades Activas:**")
+    st.markdown("**APIs Reales Conectadas:**")
     st.markdown("🌐 Navegación Web en Vivo")
-    st.markdown("📅 Google Calendar (Autónomo)")
-    st.markdown("📧 Gmail con Adjuntos")
-    st.markdown("📄 Word (`.docx`)")
-    st.markdown("📊 PowerPoint (`.pptx`)")
-    st.markdown("📈 Excel (`.xlsx`)")
+    st.markdown("📅 Google Calendar API v3")
+    st.markdown("📧 Gmail API v1 (Envío Real)")
+    st.markdown("🟦 Google Docs + Word")
+    st.markdown("🟨 Google Slides + PPT")
+    st.markdown("🟩 Google Sheets + Excel")
 
     st.divider()
-    if st.button("🔄 Cambiar Credenciales", use_container_width=True):
-        st.session_state["conectado"] = False
+    if st.button("Cerrar sesión de Google", use_container_width=True):
+        st.session_state["google_creds"] = None
+        st.session_state["google_email"] = ""
         st.rerun()
 
-st.title("🎓 AGENTE IA ULIMA — Orientación, Postulantes y 14 Carreras (ODS 4)")
+st.title("🎓 AGENTE IA ULIMA — Ecosistema Google Real (ODS 4)")
 st.markdown(
-    "Agente autónomo con **navegación por internet en tiempo real**, conectado a **Gmail, Google Calendar, Word (.docx), PowerPoint (.pptx) y Excel (.xlsx)** "
-    "para facilitar el ingreso, la orientación vocacional y el estudio en las **14 carreras de la Universidad de Lima**."
+    "Agente autónomo con **navegación por internet en tiempo real**, conectado vía **OAuth 2.0** directamente a tu **Gmail, Google Calendar, Google Docs, Google Slides y Google Sheets** "
+    "para orientación vocacional, postulantes y las **14 carreras de la Universidad de Lima**."
 )
 
 perfil = st.radio(
@@ -574,7 +660,7 @@ perfil = st.radio(
         "🧭 Orientación Vocacional ULima (14 carreras)",
         "🚀 Postulante a la ULima (Admisión / CEPREULIMA / Escolar)",
         "🎓 Alumno Regular ULima (14 Carreras / Estudios Generales)",
-        "🤖 Asistente Libre IA (Pídele cualquier tarea, investigación, PPT, Doc, Excel, Calendar o Gmail)"
+        "🤖 Asistente Libre IA (Navegar web, Docs, Slides, Sheets, Calendar y Gmail)"
     ],
     horizontal=True
 )
@@ -603,7 +689,7 @@ if "Orientación" in perfil:
     necesidad = "Orientación Vocacional Personalizada ULima"
     valor_default_mision = (
         f"Investiga en internet sobre las carreras de la ULima ({detalle_perfil}) según mis intereses ('{intereses}'), "
-        "dime cuál es mi mejor opción, créame un Word, una presentación PPT y un Excel comparativo, prográmalo en mi Google Calendar para mañana a las 5:00 pm y mándalo a mi correo."
+        "dime cuál es mi mejor opción, crea un Google Docs, un Google Slides y un Google Sheets comparativo, prográmalo en mi Google Calendar para mañana a las 5:00 pm y mándamelo por Gmail."
     )
 
 elif "Postulante" in perfil:
@@ -634,14 +720,14 @@ elif "Postulante" in perfil:
             [
                 "Simulacro guiado con preguntas tipo ULima y trucos",
                 "Explicación desde cero sin estrés",
-                "Plan de estudio en Excel, PPT y Google Calendar",
+                "Plan de estudio en Google Sheets, Slides y Calendar",
                 "Guía puente hacia Estudios Generales ULima"
             ]
         )
     detalle_perfil = f"{modalidad} → {carrera_objetivo}"
     valor_default_mision = (
         f"Explícalo fácil desde cero para un postulante a {carrera_objetivo} en la ULima con 4 preguntas tipo examen resueltas paso a paso, "
-        "hazme un Word, un PowerPoint resumen y un Excel de estudio, agéndalo en mi Google Calendar para mañana a las 6:00 pm y envíamelo a mi correo."
+        "créame un Google Docs, un Google Slides y un Google Sheets de estudio, agéndalo en mi Google Calendar para mañana a las 6:00 pm y envíamelo por Gmail."
     )
 
 elif "Alumno" in perfil:
@@ -661,15 +747,15 @@ elif "Alumno" in perfil:
             "¿Cómo te facilitamos el curso hoy?",
             [
                 "Preparación rápida para Examen Parcial / Final",
-                "Presentación PPT + Word lista para exposición grupal",
+                "Google Slides + Google Docs listos para exposición grupal",
                 "Explicar teoría difícil desde cero con ejemplos prácticos",
-                "Plan de estudio en Excel + Google Calendar"
+                "Plan de estudio en Google Sheets + Google Calendar"
             ]
         )
     detalle_perfil = carrera_actual
     valor_default_mision = (
         f"Investiga en internet casos actuales, explícalo fácil para un alumno de {carrera_actual} en la ULima con 3 ejercicios resueltos, "
-        "genera un Word, una presentación PPT y un Excel descargable, prográmalo en mi Google Calendar para mañana a las 7:00 pm y envíamelo al correo."
+        "crea un Google Docs, un Google Slides y un Google Sheets, prográmalo en mi Google Calendar para mañana a las 7:00 pm y envíamelo por Gmail."
     )
 
 else:
@@ -684,14 +770,14 @@ else:
             "Contexto / Facultad de referencia",
             ["Comunidad ULima General"] + CARRERAS_ULIMA
         )
-    necesidad = "Ejecución Autónoma Multiherramienta"
+    necesidad = "Ejecución Autónoma en Google Workspace"
     valor_default_mision = (
-        "Busca información actualizada en internet sobre este tema, crea un informe en Word, una presentación PPT de 6 diapositivas "
-        "y un Excel con métricas clave, agéndalo en mi Google Calendar para mañana a las 4:00 pm y envíalo a mi correo."
+        "Busca información actualizada en internet sobre este tema, crea un Google Docs, un Google Slides de 6 diapositivas "
+        "y un Google Sheets con métricas clave, agéndalo en mi Google Calendar para mañana a las 4:00 pm y envíalo a mi Gmail."
     )
 
 objetivo_extra = st.text_area(
-    "Pídele lo que quieras como IA (navegar en internet, crear Word, PPT, Excel, agendar fechas en Calendar o mandar Gmails):",
+    "Pídele lo que quieras como IA (navegar en internet, agendar directo en Google Calendar, crear Docs/Slides/Sheets o mandar Gmails):",
     value=valor_default_mision,
     height=105
 )
@@ -706,21 +792,21 @@ if st.button("⚡ Ejecutar Agente IA Autónomo", type="primary", use_container_w
     destinatario_final = correos_en_texto[0] if correos_en_texto else correo_destino_ui.strip()
 
     estado_calendario = {
-        "inicio": datetime.combine(fecha_base_ui, hora_base_ui),
+        "inicio": datetime.combine(fecha_base_ui, hora_base_ui, tzinfo=ZONA_LIMA),
         "titulo": f"ULima ODS 4: {tema}",
-        "url_gcal": "",
-        "ics_texto": "",
+        "link_evento": "https://calendar.google.com",
         "programado_por_ia": False
     }
-    estado_archivos = {"word": False, "ppt": False, "excel": False}
-    estado_gmail = {"intentado": False, "exito": False, "mensaje": ""}
+    enlaces_workspace = {"docs": "", "slides": "", "sheets": ""}
+    exito_gmail = False
 
     try:
         client = genai.Client(api_key=st.session_state["api_key"])
+        creds = st.session_state["google_creds"]
 
-        with st.status("⚡ Agente IA navegando en internet y ejecutando herramientas...", expanded=True) as status:
+        with st.status("⚡ Agente IA navegando en internet y operando tu Google Workspace...", expanded=True) as status:
             # FASE 1: Navegación Web en Vivo + Wikipedia
-            st.write("🌐 **Fase 1/3:** Navegando en internet y leyendo fuentes académicas en tiempo real...")
+            st.write("🌐 **Fase 1/3:** Navegando en internet y leyendo fuentes académicas en vivo...")
             query_busqueda = (
                 f"Universidad de Lima {detalle_perfil} {tema}"
                 if "Libre" not in perfil else
@@ -745,150 +831,119 @@ if st.button("⚡ Ejecutar Agente IA Autónomo", type="primary", use_container_w
                 f"Información extraída de internet en vivo:\n{info_web}\n\n"
                 f"Referencia enciclopédica:\n{info_wiki}\n\n"
                 f"Genera una respuesta completa, clara, fácil de entender y muy bien estructurada en Markdown con secciones (`## `) "
-                f"para que sirva tanto de lectura directa como de base para generar documentos Word, diapositivas PPT y tablas Excel. "
+                f"para generar Google Docs, Google Slides y Google Sheets. "
                 f"Encabézala con un breve **Índice de Facilitación ULima (ODS 4): [Puntaje/100]** y cierra con un **Checklist Rápido de Acción**."
             )
             contenido_final, modelo_usado = llamar_gemini_blindado(client, prompt_maestro, modelos_activos)
             modelos_priorizados = [modelo_usado] + [m for m in modelos_activos if m != modelo_usado]
             bitacora.append(f"[{ahora_lima().strftime('%H:%M:%S')}] 🧠 Contenido generado por IA ({modelo_usado})")
 
-            # FASE 3: Orquestación Autónoma de Herramientas (Calendar, Word, PPT, Excel, Gmail)
-            st.write("🤖 **Fase 3/3:** Ejecutando acciones en Google Calendar, Word, PowerPoint, Excel y Gmail...")
+            # FASE 3: Ejecución Real en Google Calendar API, Google Drive API y Gmail API
+            st.write("🤖 **Fase 3/3:** Agendando directo en Google Calendar, creando Docs/Slides/Sheets y enviando Gmail...")
 
             def tool_agendar_google_calendar(titulo_evento: str, fecha_yyyy_mm_dd: str, hora_hh_mm: str, duracion_minutos: int = 90) -> str:
-                """Crea y programa una fecha y hora exacta en Google Calendar según la instrucción del usuario."""
+                """Inserta el evento directamente en el Google Calendar real del usuario."""
                 try:
-                    dt_parsed = datetime.strptime(f"{fecha_yyyy_mm_dd.strip()} {hora_hh_mm.strip()}", "%Y-%m-%d %H:%M")
+                    dt_naive = datetime.strptime(f"{fecha_yyyy_mm_dd.strip()} {hora_hh_mm.strip()}", "%Y-%m-%d %H:%M")
+                    dt_parsed = dt_naive.replace(tzinfo=ZONA_LIMA)
                 except Exception:
-                    dt_parsed = datetime.combine(fecha_base_ui, hora_base_ui)
+                    dt_parsed = datetime.combine(fecha_base_ui, hora_base_ui, tzinfo=ZONA_LIMA)
 
-                log_cal, url_cal, ics_txt, ini_dt = construir_evento_calendar(
+                link_ev, log_cal = insertar_evento_real_google_calendar(
+                    creds,
                     titulo_evento or f"ULima ODS 4: {tema}",
                     dt_parsed,
                     duracion_minutos or 90,
-                    f"Sesión ULima ({detalle_perfil}) - {necesidad}",
-                    destinatario_final
+                    f"Sesión ULima ({detalle_perfil}) - {necesidad}"
                 )
-                estado_calendario["inicio"] = ini_dt
+                estado_calendario["inicio"] = dt_parsed
                 estado_calendario["titulo"] = titulo_evento or f"ULima ODS 4: {tema}"
-                estado_calendario["url_gcal"] = url_cal
-                estado_calendario["ics_texto"] = ics_txt
+                estado_calendario["link_evento"] = link_ev
                 estado_calendario["programado_por_ia"] = True
                 bitacora.append(log_cal)
                 return log_cal
 
-            def tool_generar_documentos_office(hacer_word: bool = True, hacer_ppt: bool = True, hacer_excel: bool = True) -> str:
-                """Genera los archivos descargables en Word (.docx), PowerPoint (.pptx) y Excel (.xlsx)."""
-                res = []
-                if hacer_word:
-                    log_w = crear_word_archivo(tema, detalle_perfil, contenido_final)
-                    estado_archivos["word"] = True
-                    bitacora.append(log_w)
-                    res.append("Word")
-                if hacer_ppt:
-                    log_p = crear_ppt_archivo(tema, detalle_perfil, contenido_final)
-                    estado_archivos["ppt"] = True
-                    bitacora.append(log_p)
-                    res.append("PPT")
-                if hacer_excel:
-                    log_e = crear_excel_archivo(tema, detalle_perfil, contenido_final, estado_calendario["inicio"])
-                    estado_archivos["excel"] = True
-                    bitacora.append(log_e)
-                    res.append("Excel")
-                return "Archivos generados: " + ", ".join(res)
-
-            prompt_orquestador = (
+            prompt_calendar = (
                 f"Hoy es {fecha_hoy_str}. Analiza la instrucción del usuario: '{objetivo_extra}'.\n"
-                f"1) Llama a `tool_agendar_google_calendar` convirtiendo cualquier fecha/hora mencionada ('mañana', 'este viernes', 'a las 4 pm', etc.) "
-                f"a `YYYY-MM-DD` y `HH:MM` (24h). Si no mencionó fecha/hora, usa `{fecha_base_ui.strftime('%Y-%m-%d')}` y `{hora_base_ui.strftime('%H:%M')}`.\n"
-                f"2) Llama a `tool_generar_documentos_office(hacer_word=True, hacer_ppt=True, hacer_excel=True)` para crear los archivos solicitados."
+                f"Llama a `tool_agendar_google_calendar` convirtiendo cualquier fecha/hora mencionada ('mañana', 'este viernes', 'a las 4 pm', etc.) "
+                f"a `YYYY-MM-DD` y `HH:MM` (24h). Si no mencionó fecha/hora, usa `{fecha_base_ui.strftime('%Y-%m-%d')}` y `{hora_base_ui.strftime('%H:%M')}`."
             )
-            llamar_gemini_blindado(
-                client,
-                prompt_orquestador,
-                modelos_priorizados,
-                herramientas=[tool_agendar_google_calendar, tool_generar_documentos_office]
-            )
+            llamar_gemini_blindado(client, prompt_calendar, modelos_priorizados, herramientas=[tool_agendar_google_calendar])
 
-            # Garantizar ejecución completa si el modelo omitió alguna llamada
             if not estado_calendario["programado_por_ia"]:
-                dt_def = datetime.combine(fecha_base_ui, hora_base_ui)
-                log_cal, url_cal, ics_txt, ini_dt = construir_evento_calendar(
+                dt_def = datetime.combine(fecha_base_ui, hora_base_ui, tzinfo=ZONA_LIMA)
+                link_ev, log_cal = insertar_evento_real_google_calendar(
+                    creds,
                     f"ULima ODS 4: {tema}",
                     dt_def,
                     90,
-                    f"Sesión ULima ({detalle_perfil}) - {necesidad}",
-                    destinatario_final
+                    f"Sesión ULima ({detalle_perfil}) - {necesidad}"
                 )
-                estado_calendario["inicio"] = ini_dt
-                estado_calendario["url_gcal"] = url_cal
-                estado_calendario["ics_texto"] = ics_txt
+                estado_calendario["inicio"] = dt_def
+                estado_calendario["link_evento"] = link_ev
                 bitacora.append(log_cal)
 
-            if not estado_archivos["word"]:
-                bitacora.append(crear_word_archivo(tema, detalle_perfil, contenido_final))
-                estado_archivos["word"] = True
-            if not estado_archivos["ppt"]:
-                bitacora.append(crear_ppt_archivo(tema, detalle_perfil, contenido_final))
-                estado_archivos["ppt"] = True
-            if not estado_archivos["excel"]:
-                bitacora.append(crear_excel_archivo(tema, detalle_perfil, contenido_final, estado_calendario["inicio"]))
-                estado_archivos["excel"] = True
+            # Crear archivos locales y subirlos convertidos a Google Docs, Google Slides y Google Sheets
+            bitacora.append(crear_word_archivo(tema, detalle_perfil, contenido_final))
+            bitacora.append(crear_ppt_archivo(tema, detalle_perfil, contenido_final))
+            bitacora.append(crear_excel_archivo(tema, detalle_perfil, contenido_final, estado_calendario["inicio"]))
 
-            # Envío automático por Gmail con Word + PPT + Excel + Calendar adjuntos
+            enlaces_workspace, logs_drive = subir_a_google_workspace(creds, tema)
+            bitacora.extend(logs_drive)
+
+            # Enviar Gmail real vía Gmail API v1
             if destinatario_final:
-                exito_mail, msg_mail = enviar_gmail_completo(
-                    st.session_state["gmail_user"],
-                    st.session_state["gmail_pass"],
+                exito_gmail, msg_gmail = enviar_gmail_real_api(
+                    creds,
                     destinatario_final,
                     f"Agente IA ULima ({detalle_perfil}): {tema} [{estado_calendario['inicio'].strftime('%d/%m %H:%M')}]",
                     contenido_final,
-                    estado_calendario["ics_texto"],
-                    f"{estado_calendario['titulo']} — {estado_calendario['inicio'].strftime('%d/%m/%Y %H:%M')}"
+                    enlaces_workspace,
+                    estado_calendario["link_evento"]
                 )
-                estado_gmail["intentado"] = True
-                estado_gmail["exito"] = exito_mail
-                estado_gmail["mensaje"] = msg_mail
-                bitacora.append(msg_mail)
+                bitacora.append(msg_gmail)
 
             duracion = round(time.time() - tiempo_inicio, 1)
-            status.update(label=f"✨ Misión autónoma completada en {duracion}s ({modelo_usado})", state="complete", expanded=False)
+            status.update(label=f"✨ Todo sincronizado en tu Google Workspace en {duracion}s ({modelo_usado})", state="complete", expanded=False)
 
     except Exception as error_controlado:
         st.warning(f"⚠️ Aviso del sistema: {error_controlado}")
         st.stop()
 
-    # Alertas visuales de sincronización
-    if estado_gmail["intentado"]:
-        if estado_gmail["exito"]:
-            st.success(f"✅ **Gmail y Calendar Sincronizados:** {estado_gmail['mensaje']}")
-        else:
-            st.warning(f"⚠️ {estado_gmail['mensaje']}")
-
-    st.info(
-        f"📅 **Google Calendar:** `{estado_calendario['titulo']}` programado para el "
+    st.success(
+        f"📅 **Agendado directo en tu Google Calendar:** `{estado_calendario['titulo']}` el "
         f"**{estado_calendario['inicio'].strftime('%d/%m/%Y a las %H:%M')}** (Hora Lima)."
     )
 
     st.divider()
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Tiempo Total", f"{duracion} seg")
-    m2.metric("Office Generado", "Word + PPT + Excel")
+    m2.metric("Google Drive", "Docs + Slides + Sheets")
     m3.metric("Google Calendar", estado_calendario["inicio"].strftime("%d/%m %H:%M"))
-    m4.metric("Gmail", "Enviado ✅" if estado_gmail["exito"] else "Listo para descargar")
+    m4.metric("Gmail API", "Enviado ✅" if exito_gmail else "Listo")
 
-    with st.expander("🛠️ Bitácora en Vivo de Navegación y Acciones del Agente", expanded=True):
+    with st.expander("🛠️ Bitácora en Vivo de APIs Ejecutadas en tu Cuenta Google", expanded=True):
         for linea_log in bitacora:
             st.code(linea_log, language="text")
 
-    st.subheader("📦 Descargas Directas (Word, PowerPoint, Excel) y Google Calendar")
-    b1, b2, b3, b4, b5 = st.columns(5)
+    st.subheader("☁️ Abrir Directamente en tu Google Workspace (Creados en tu Drive y Calendar)")
+    g1, g2, g3, g4 = st.columns(4)
+    with g1:
+        st.link_button("🟦 Abrir en Google Docs", enlaces_workspace["docs"] or "https://docs.google.com", use_container_width=True)
+    with g2:
+        st.link_button("🟨 Abrir en Google Slides", enlaces_workspace["slides"] or "https://slides.google.com", use_container_width=True)
+    with g3:
+        st.link_button("🟩 Abrir en Google Sheets", enlaces_workspace["sheets"] or "https://sheets.google.com", use_container_width=True)
+    with g4:
+        st.link_button("📅 Ver en Google Calendar", estado_calendario["link_evento"], use_container_width=True)
 
+    st.subheader("📦 Descargas Locales (Word, PowerPoint, Excel)")
+    b1, b2, b3 = st.columns(3)
     with b1:
         if os.path.exists(ARCHIVO_WORD_PATH):
             with open(ARCHIVO_WORD_PATH, "rb") as f_doc:
                 st.download_button(
-                    label="📄 Word (.docx)",
+                    label="📄 Descargar Word (.docx)",
                     data=f_doc.read(),
                     file_name=f"Documento_ULima_{tema.replace(' ', '_')}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -898,7 +953,7 @@ if st.button("⚡ Ejecutar Agente IA Autónomo", type="primary", use_container_w
         if os.path.exists(ARCHIVO_PPT_PATH):
             with open(ARCHIVO_PPT_PATH, "rb") as f_ppt:
                 st.download_button(
-                    label="📊 PowerPoint (.pptx)",
+                    label="📊 Descargar PowerPoint (.pptx)",
                     data=f_ppt.read(),
                     file_name=f"Presentacion_ULima_{tema.replace(' ', '_')}.pptx",
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -908,25 +963,12 @@ if st.button("⚡ Ejecutar Agente IA Autónomo", type="primary", use_container_w
         if os.path.exists(ARCHIVO_EXCEL_PATH):
             with open(ARCHIVO_EXCEL_PATH, "rb") as f_xls:
                 st.download_button(
-                    label="📈 Excel (.xlsx)",
+                    label="📈 Descargar Excel (.xlsx)",
                     data=f_xls.read(),
                     file_name=f"Hoja_ULima_{tema.replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
-    with b4:
-        if os.path.exists(ARCHIVO_ICS_PATH):
-            with open(ARCHIVO_ICS_PATH, "rb") as f_ics:
-                st.download_button(
-                    label="📅 Calendar (.ics)",
-                    data=f_ics.read(),
-                    file_name="Evento_ULima_ODS4.ics",
-                    mime="text/calendar",
-                    use_container_width=True
-                )
-    with b5:
-        if estado_calendario["url_gcal"]:
-            st.link_button("🗓️ Abrir Google Calendar", estado_calendario["url_gcal"], use_container_width=True)
 
     st.divider()
     st.subheader(f"📘 Resultado Generado — {detalle_perfil}")
