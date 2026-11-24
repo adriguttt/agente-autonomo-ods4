@@ -2,7 +2,7 @@ import os
 import socket
 
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
-socket.setdefaulttimeout(20)
+socket.setdefaulttimeout(15)
 
 import io
 import base64
@@ -46,6 +46,12 @@ SCOPES = [
     "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/contacts.readonly",
     "https://www.googleapis.com/auth/forms.body",
+]
+
+MODELOS_DISPONIBLES = [
+    "gemini-3.8-flash",
+    "gemini-3.8-flash-lite",
+    "gemini-2.5-flash-lite",
 ]
 
 
@@ -115,41 +121,47 @@ def get_user_credentials() -> Credentials | None:
 
 
 # ==============================================================================
-# 2. HERRAMIENTAS AUTÓNOMAS DEL AGENTE (AISLADAS POR SESIÓN)
+# 2. HERRAMIENTAS AUTÓNOMAS DEL AGENTE (0 CONSUMO EXTRA DE CUOTA GEMINI)
 # ==============================================================================
 def buscar_internet(consulta: str) -> str:
-    """Busca información actualizada en internet usando Google Search."""
+    """Busca información actualizada en internet y devuelve títulos, enlaces y resúmenes."""
     try:
-        c = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-        res = c.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=f"Busca información actualizada, concreta y con fuentes sobre: {consulta}",
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.2,
-            ),
-        )
-        if res.text:
-            return res.text
+        resultados = []
+        with DDGS(timeout=6) as ddgs:
+            for r in ddgs.text(consulta, max_results=5):
+                resultados.append(
+                    f"- {r.get('title')}: {r.get('body')} (URL: {r.get('href')})"
+                )
+        if resultados:
+            return "\n".join(resultados)
     except Exception:
         pass
 
     try:
-        resultados = []
-        with DDGS(timeout=8) as ddgs:
-            for r in ddgs.text(consulta, max_results=4):
-                resultados.append(
-                    f"- {r.get('title')}: {r.get('body')} (URL: {r.get('href')})"
+        resp = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": consulta},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=6,
+        )
+        soup = BeautifulSoup(resp.text, "html.parser")
+        items = []
+        for res in soup.select(".result")[:5]:
+            titulo = res.select_one(".result__a")
+            snippet = res.select_one(".result__snippet")
+            if titulo:
+                items.append(
+                    f"- {titulo.get_text(strip=True)}: {snippet.get_text(strip=True) if snippet else ''} (URL: {titulo.get('href', '')})"
                 )
-        return "\n".join(resultados) if resultados else "No se encontraron resultados."
-    except Exception as e:
-        return f"No se pudo completar la búsqueda web: {e}"
+        return "\n".join(items) if items else "Sin resultados web adicionales; responde con tu conocimiento actualizado."
+    except Exception:
+        return "Búsqueda web no disponible temporalmente; responde con tu conocimiento académico actualizado."
 
 
 def leer_pagina_web(url: str) -> str:
     """Extrae el texto principal de una URL pública para analizar artículos o documentos web."""
     try:
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "nav", "footer"]):
@@ -188,18 +200,17 @@ def buscar_videos_youtube(tema: str, max_resultados: int = 5) -> str:
         pass
 
     try:
-        c = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-        res = c.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=f"Busca {limite} videos reales en YouTube sobre '{tema}' y devuelve sus títulos, canales y enlaces https://www.youtube.com/watch?v=...",
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.2,
-            ),
-        )
-        return res.text or "No se encontraron videos en YouTube para ese tema."
-    except Exception as e:
-        return f"Error al buscar videos en YouTube: {e}"
+        resultados = []
+        with DDGS(timeout=6) as ddgs:
+            for r in ddgs.text(f"site:youtube.com/watch {tema}", max_results=limite):
+                resultados.append(f"- **{r.get('title')}** -> {r.get('href')}")
+        if resultados:
+            return "\n".join(resultados)
+    except Exception:
+        pass
+
+    query_yt = quote_plus(tema)
+    return f"Búsqueda directa de videos educativos en YouTube sobre **{tema}**: https://www.youtube.com/results?search_query={query_yt}"
 
 
 def gestionar_google_tasks(
@@ -352,13 +363,13 @@ def planificar_ruta_google_maps(
             "https://nominatim.openstreetmap.org/search",
             params={"q": origen, "format": "json", "limit": 1},
             headers=headers,
-            timeout=6,
+            timeout=5,
         ).json()
         g2 = requests.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": destino, "format": "json", "limit": 1},
             headers=headers,
-            timeout=6,
+            timeout=5,
         ).json()
         if g1 and g2:
             lon1, lat1 = g1[0]["lon"], g1[0]["lat"]
@@ -367,7 +378,7 @@ def planificar_ruta_google_maps(
             ruta = requests.get(
                 f"https://router.project-osrm.org/route/v1/{perfil}/{lon1},{lat1};{lon2},{lat2}",
                 params={"overview": "false"},
-                timeout=6,
+                timeout=5,
             ).json()
             if ruta.get("routes"):
                 dist_km = round(ruta["routes"][0]["distance"] / 1000, 2)
@@ -804,31 +815,49 @@ if prompt_final:
 
     with st.chat_message("assistant"):
         with st.spinner("Ejecutando herramientas autónomas..."):
-            try:
-                client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-                historial_gemini = [
-                    types.Content(
-                        role="model" if m["role"] == "assistant" else "user",
-                        parts=[types.Part.from_text(text=m["content"])],
-                    )
-                    for m in st.session_state["messages"][:-1]
-                ]
-                chat = client.chats.create(
-                    model="gemini-3.8-flash",
-                    history=historial_gemini,
-                    config=types.GenerateContentConfig(
-                        system_instruction=get_system_instruction(),
-                        tools=TOOLS_LIST,
-                        temperature=0.4,
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                            maximum_remote_calls=6
-                        ),
-                    ),
+            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+            historial_gemini = [
+                types.Content(
+                    role="model" if m["role"] == "assistant" else "user",
+                    parts=[types.Part.from_text(text=m["content"])],
                 )
-                response = chat.send_message(prompt_final)
-                texto_respuesta = response.text or "Acción completada."
-            except Exception as e:
-                texto_respuesta = f"Ocurrió un error al procesar la solicitud: {e}"
+                for m in st.session_state["messages"][:-1]
+            ]
+            texto_respuesta = None
+            ultimo_error = None
+
+            for modelo in MODELOS_DISPONIBLES:
+                try:
+                    chat = client.chats.create(
+                        model=modelo,
+                        history=historial_gemini,
+                        config=types.GenerateContentConfig(
+                            system_instruction=get_system_instruction(),
+                            tools=TOOLS_LIST,
+                            temperature=0.4,
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                maximum_remote_calls=6
+                            ),
+                        ),
+                    )
+                    response = chat.send_message(prompt_final)
+                    texto_respuesta = response.text or "Acción completada."
+                    break
+                except Exception as e:
+                    ultimo_error = str(e)
+                    if "429" in ultimo_error or "404" in ultimo_error:
+                        continue
+                    break
+
+            if not texto_respuesta:
+                if ultimo_error and "429" in ultimo_error:
+                    texto_respuesta = (
+                        "⚠️ Se alcanzó el límite diario gratuito de peticiones de esta API Key. "
+                        "Genera una clave nueva en aistudio.google.com/apikey (en un proyecto nuevo) "
+                        "y actualiza `GEMINI_API_KEY` en Streamlit Secrets."
+                    )
+                else:
+                    texto_respuesta = f"Ocurrió un error al procesar la solicitud: {ultimo_error}"
 
             st.markdown(texto_respuesta)
             st.session_state["messages"].append(
