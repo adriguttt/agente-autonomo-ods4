@@ -39,7 +39,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/contacts.readonly",
     "https://www.googleapis.com/auth/forms.body",
-    "https://www.googleapis.com/auth/youtube.readonly",
 ]
 
 SYSTEM_INSTRUCTION = """
@@ -127,35 +126,45 @@ def leer_pagina_web(url: str) -> str:
 
 def buscar_videos_youtube(tema: str, max_resultados: int = 5) -> str:
     """Busca videos educativos, tutoriales o conferencias en YouTube sobre un tema académico."""
-    creds = get_user_credentials()
-    if not creds:
-        return "Modo Rápido activo: inicia sesión con Google para buscar en la API de YouTube."
+    limite = min(max_resultados, 8)
     try:
-        yt = build("youtube", "v3", credentials=creds)
+        yt = build("youtube", "v3", developerKey=st.secrets["GEMINI_API_KEY"])
         res = (
             yt.search()
             .list(
                 part="snippet",
                 q=tema,
                 type="video",
-                maxResults=min(max_resultados, 8),
+                maxResults=limite,
                 relevanceLanguage="es",
             )
             .execute()
         )
         items = res.get("items", [])
-        if not items:
-            return "No se encontraron videos en YouTube para ese tema."
-        salida = []
-        for item in items:
-            vid_id = item["id"]["videoId"]
-            snippet = item["snippet"]
-            salida.append(
-                f"- **{snippet['title']}** (Canal: {snippet['channelTitle']}) -> https://www.youtube.com/watch?v={vid_id}"
+        if items:
+            return "\n".join(
+                [
+                    f"- **{it['snippet']['title']}** (Canal: {it['snippet']['channelTitle']}) -> https://www.youtube.com/watch?v={it['id']['videoId']}"
+                    for it in items
+                ]
             )
-        return "\n".join(salida)
+    except Exception:
+        pass
+
+    try:
+        resultados = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(f"site:youtube.com/watch {tema}", max_results=limite):
+                resultados.append(
+                    f"- **{r.get('title')}** -> {r.get('href')}"
+                )
+        return (
+            "\n".join(resultados)
+            if resultados
+            else "No se encontraron videos en YouTube para ese tema."
+        )
     except Exception as e:
-        return f"Error al consultar YouTube (verifica que YouTube Data API v3 esté habilitada): {e}"
+        return f"Error al buscar videos en YouTube: {e}"
 
 
 def gestionar_google_tasks(
@@ -192,7 +201,7 @@ def gestionar_google_tasks(
             ]
         )
     except Exception as e:
-        return f"Error en Google Tasks (verifica Google Tasks API): {e}"
+        return f"Error en Google Tasks: {e}"
 
 
 def buscar_contactos_google(nombre_o_correo: str) -> str:
@@ -221,7 +230,7 @@ def buscar_contactos_google(nombre_o_correo: str) -> str:
             salida.append(f"- {nombre} | Correo: {correo} | Tel: {tel}")
         return "\n".join(salida)
     except Exception as e:
-        return f"Error al buscar en Contactos (verifica Google People API): {e}"
+        return f"Error al buscar en Contactos: {e}"
 
 
 def crear_formulario_google(
@@ -288,7 +297,7 @@ def crear_formulario_google(
             f"- Enlace para editar: {edit_url}"
         )
     except Exception as e:
-        return f"Error al crear Google Form (verifica Google Forms API): {e}"
+        return f"Error al crear Google Form: {e}"
 
 
 def planificar_ruta_google_maps(
@@ -666,7 +675,7 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
             st.error(f"Revisa tus Secrets de OAuth en Streamlit: {e}")
 
         if st.button(
-            "⚡ Entrar ahora en Modo Rápido (Web + Word + PPT + Excel + Maps)",
+            "⚡ Entrar ahora en Modo Rápido (Web + Word + PPT + Excel + YouTube + Maps)",
             use_container_width=True,
         ):
             st.session_state["modo_rapido"] = True
