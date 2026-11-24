@@ -55,12 +55,32 @@ def buscar_wikipedia_rapido(concepto: str) -> tuple[str, str]:
         return "", f"[{hora}] 📚 Wikipedia API: usando síntesis académica interna"
 
 
-def llamar_gemini_blindado(client: genai.Client, prompt: str, modelo_preferido: str) -> tuple[str, str]:
-    modelos_fallback = [modelo_preferido, "gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
-    modelos_unicos = list(dict.fromkeys(modelos_fallback))
+def obtener_modelos_activos(client: genai.Client, modelo_preferido: str) -> list[str]:
+    prioridad = [modelo_preferido, "gemini-3.8-flash", "gemini-3.8-pro"]
+    detectados = []
+    try:
+        for m in client.models.list():
+            nombre = getattr(m, "name", "").replace("models/", "")
+            acciones = getattr(m, "supported_actions", []) or []
+            if "gemini" in nombre and ("generateContent" in acciones or not acciones):
+                if not any(x in nombre for x in ["embedding", "imagen", "veo", "aqa", "tts", "audio", "robotics", "computer"]):
+                    detectados.append(nombre)
+    except Exception:
+        pass
 
+    ordenados = []
+    for p in prioridad:
+        if (not detectados or p in detectados) and p not in ordenados:
+            ordenados.append(p)
+    for d in detectados:
+        if d not in ordenados:
+            ordenados.append(d)
+    return ordenados[:5] if ordenados else [modelo_preferido, "gemini-3.8-flash", "gemini-3.8-pro"]
+
+
+def llamar_gemini_blindado(client: genai.Client, prompt: str, modelos_activos: list[str]) -> tuple[str, str]:
     ultimo_error = ""
-    for modelo in modelos_unicos:
+    for modelo in modelos_activos:
         for intento in range(2):
             try:
                 respuesta = client.models.generate_content(
@@ -71,18 +91,19 @@ def llamar_gemini_blindado(client: genai.Client, prompt: str, modelo_preferido: 
                     return respuesta.text, modelo
             except Exception as e:
                 ultimo_error = str(e)
-                if "API_KEY_INVALID" in ultimo_error or "400" in ultimo_error:
+                if "API_KEY_INVALID" in ultimo_error:
                     raise ValueError("La API Key ingresada no es válida. Verifica que empiece con 'AIza...'.")
-                time.sleep(1.5)
+                if "404" in ultimo_error or "NOT_FOUND" in ultimo_error:
+                    break
+                time.sleep(2.5)
 
-    raise RuntimeError(f"Los servidores gratuitos de Google no respondieron tras cambiar de modelo ({ultimo_error[:120]}).")
+    raise RuntimeError(f"Google Gemini está saturado en este instante. Espera 15 segundos y vuelve a intentar. ({ultimo_error[:140]})")
 
 
 def generar_archivos_locales(titulo: str, contenido_md: str, inicio_dt: datetime, fin_dt: datetime) -> list[str]:
     logs = []
     hora = datetime.now().strftime("%H:%M:%S")
 
-    # 1. Word (.docx)
     doc = Document()
     doc.add_heading("SISTEMA MULTI-AGENTE AUTÓNOMO — ODS 4 (UNESCO)", level=0)
     doc.add_heading(titulo, level=1)
@@ -103,7 +124,6 @@ def generar_archivos_locales(titulo: str, contenido_md: str, inicio_dt: datetime
     doc.save(ARCHIVO_WORD_PATH)
     logs.append(f"[{hora}] 📄 Documento Word (.docx) generado correctamente")
 
-    # 2. Calendario (.ics)
     ics_texto = (
         "BEGIN:VCALENDAR\n"
         "VERSION:2.0\n"
@@ -195,7 +215,6 @@ def enviar_alertas_push(webhook_url: str, tg_token: str, tg_chat_id: str, resume
     return logs
 
 
-# --- INTERFAZ DE USUARIO ---
 with st.sidebar:
     st.title("⚙️ Centro de Conexiones")
     st.caption("Ecosistema Multi-Agente Rápido (ODS 4)")
@@ -206,7 +225,7 @@ with st.sidebar:
     )
     modelo_elegido = st.selectbox(
         "⚡ Motor Principal Gemini",
-        ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+        ["gemini-3.8-flash", "gemini-3.8-pro"]
     )
 
     st.divider()
@@ -274,13 +293,14 @@ if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_cont
         client = genai.Client(api_key=api_key.strip())
 
         with st.status("⚡ Ejecutando agentes y conexiones externas en paralelo...", expanded=True) as status:
-            # FASE 1: Búsqueda externa paralela + Agente Investigador
             st.write("🔍 **Fase 1/3:** *Agente Investigador* consultando Web Search y Wikipedia en paralelo...")
-            with ThreadPoolExecutor(max_workers=2) as pool:
+            with ThreadPoolExecutor(max_workers=3) as pool:
                 futuro_web = pool.submit(buscar_web_rapido, f"UNESCO ODS 4 {tema} {nivel}")
                 futuro_wiki = pool.submit(buscar_wikipedia_rapido, tema)
+                futuro_modelos = pool.submit(obtener_modelos_activos, client, modelo_elegido)
                 info_web, log_web = futuro_web.result()
                 info_wiki, log_wiki = futuro_wiki.result()
+                modelos_activos = futuro_modelos.result()
 
             bitacora.extend([log_web, log_wiki])
 
@@ -289,10 +309,10 @@ if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_cont
                 f"y criterios de inclusión (Metas 4.1 y 4.5) para enseñar '{tema}' en '{nivel}' bajo el contexto '{contexto}'.\n"
                 f"Fuentes web:\n{info_web}\nConcepto Wikipedia:\n{info_wiki}"
             )
-            hallazgos, modelo_usado = llamar_gemini_blindado(client, prompt_investigador, modelo_elegido)
+            hallazgos, modelo_usado = llamar_gemini_blindado(client, prompt_investigador, modelos_activos)
+            modelos_priorizados = [modelo_usado] + [m for m in modelos_activos if m != modelo_usado]
             bitacora.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🧠 Agente Investigador completado ({modelo_usado})")
 
-            # FASE 2: Agente Arquitecto Pedagógico
             st.write("🏗️ **Fase 2/3:** *Agente Arquitecto Pedagógico* construyendo el módulo adaptado...")
             prompt_arquitecto = (
                 f"Eres el Agente Arquitecto Pedagógico Inclusivo. Basándote en esta investigación:\n{hallazgos}\n\n"
@@ -301,10 +321,9 @@ if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_cont
                 f"Estructura obligatoria: 1) Objetivos de aprendizaje, 2) Explicación clara con analogías cotidianas, "
                 f"3) Actividad práctica sin depender de internet, 4) Tres ejercicios de dificultad progresiva con solucionario."
             )
-            borrador_modulo, modelo_usado = llamar_gemini_blindado(client, prompt_arquitecto, modelo_usado)
+            borrador_modulo, modelo_usado = llamar_gemini_blindado(client, prompt_arquitecto, modelos_priorizados)
             bitacora.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🏗️ Agente Arquitecto completado ({modelo_usado})")
 
-            # FASE 3: Agente Auditor de Equidad ODS 4
             st.write("🛡️ **Fase 3/3:** *Agente Auditor ODS 4* evaluando equidad, creando rúbrica y sincronizando salidas...")
             prompt_auditor = (
                 f"Eres el Agente Auditor de Calidad Educativa y Equidad ODS 4. Revisa este módulo diseñado para '{contexto}':\n\n"
@@ -314,10 +333,9 @@ if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_cont
                 f"- Todo el contenido pedagógico mejorado y listo para usar en clase.\n"
                 f"- Al final, una **Tabla de Rúbrica de Evaluación** con niveles: Inicio, En Proceso y Logrado."
             )
-            modulo_final, modelo_usado = llamar_gemini_blindado(client, prompt_auditor, modelo_usado)
+            modulo_final, modelo_usado = llamar_gemini_blindado(client, prompt_auditor, modelos_priorizados)
             bitacora.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🛡️ Agente Auditor completado ({modelo_usado})")
 
-            # FASE 4: Generación de archivos + Gmail + Discord/Telegram en paralelo
             logs_archivos = generar_archivos_locales(tema, modulo_final, inicio_dt, fin_dt)
             bitacora.extend(logs_archivos)
 
