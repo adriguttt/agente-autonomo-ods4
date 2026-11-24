@@ -5,6 +5,7 @@ os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 import io
 import base64
 import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
 from email.message import EmailMessage
 
@@ -45,7 +46,12 @@ SCOPES = [
     "https://www.googleapis.com/auth/forms.body",
 ]
 
-SYSTEM_INSTRUCTION = """
+
+def get_system_instruction() -> str:
+    ahora_lima = datetime.datetime.now(ZoneInfo("America/Lima")).strftime(
+        "%Y-%m-%d %H:%M (%A)"
+    )
+    return f"""
 Eres el Agente IA Autónomo de la Universidad de Lima enfocado en el ODS 4 (Educación de Calidad).
 Ayudas a estudiantes, docentes y postulantes a investigar, estudiar, gestionar su tiempo y automatizar tareas reales.
 
@@ -70,7 +76,8 @@ Reglas de ejecución:
 - Si el usuario pide enviar un correo a alguien por su nombre (ej. "mándale un correo a Carlos"), busca primero su correo en Google Contactos antes de enviar.
 - Si el usuario pide crear un documento, presentación u hoja de cálculo y enviarlo por Gmail, genera primero el archivo y luego usa gestionar_gmail con adjuntar_ultimo_archivo=True.
 - Responde siempre en español claro, estructurado y con enlaces directos a los recursos creados (Docs, Slides, Sheets, Forms, YouTube o Google Maps).
-- Fecha y hora actual de referencia: """ + datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+- Fecha y hora actual en Lima, Perú: {ahora_lima}
+"""
 
 
 def get_oauth_flow() -> Flow:
@@ -167,9 +174,7 @@ def buscar_videos_youtube(tema: str, max_resultados: int = 5) -> str:
         resultados = []
         with DDGS() as ddgs:
             for r in ddgs.text(f"site:youtube.com/watch {tema}", max_results=limite):
-                resultados.append(
-                    f"- **{r.get('title')}** -> {r.get('href')}"
-                )
+                resultados.append(f"- **{r.get('title')}** -> {r.get('href')}")
         return (
             "\n".join(resultados)
             if resultados
@@ -791,10 +796,10 @@ if prompt_final:
                     for m in st.session_state["messages"][:-1]
                 ]
                 chat = client.chats.create(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.8-flash",
                     history=historial_gemini,
                     config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
+                        system_instruction=get_system_instruction(),
                         tools=TOOLS_LIST,
                         temperature=0.4,
                     ),
