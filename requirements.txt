@@ -3,3 +3,4 @@ crewai[google-genai]
 google-genai
 duckduckgo-search
 litellm
+python-docx
