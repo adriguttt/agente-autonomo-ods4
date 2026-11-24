@@ -32,6 +32,15 @@ with st.sidebar:
         type="password",
         help="Pega aquí tu clave generada en Google AI Studio"
     )
+    modelo_elegido = st.selectbox(
+        "Motor IA (Google Gemini)",
+        [
+            "gemini/gemini-3.8-flash",
+            "gemini/gemini-3.8-flash-lite",
+            "gemini/gemini-3.8-pro"
+        ],
+        help="Si un servidor de Google está saturado, la app cambiará automáticamente al respaldo."
+    )
     st.divider()
     st.markdown("**Agentes Activos en el Pipeline:**")
     st.markdown("1. 🔍 **Investigador Curricular** (Web Search)")
@@ -65,15 +74,10 @@ objetivo_extra = st.text_area(
     value="Diseña un módulo completo de nivelación de 90 minutos con lectura adaptada, analogías cotidianas, ejercicios progresivos y rúbrica de evaluación."
 )
 
-if st.button("🚀 Iniciar Ejecución Autónoma de Agentes", type="primary", use_container_width=True):
-    if not api_key:
-        st.error("Ingresa tu API Key gratuita de Google AI Studio en el panel izquierdo para activar los agentes.")
-        st.stop()
-
-    os.environ["GEMINI_API_KEY"] = api_key
+def ejecutar_equipo_agentes(nombre_modelo, clave_api, callback_fn):
     llm_gemini = LLM(
-        model="gemini/gemini-3.8-flash",
-        api_key=api_key,
+        model=nombre_modelo,
+        api_key=clave_api,
         temperature=0.4
     )
 
@@ -136,21 +140,44 @@ if st.button("🚀 Iniciar Ejecución Autónoma de Agentes", type="primary", use
         context=[tarea_2]
     )
 
+    equipo = Crew(
+        agents=[investigador, arquitecto, auditor],
+        tasks=[tarea_1, tarea_2, tarea_3],
+        process=Process.sequential,
+        task_callback=callback_fn
+    )
+    return equipo.kickoff()
+
+if st.button("🚀 Iniciar Ejecución Autónoma de Agentes", type="primary", use_container_width=True):
+    if not api_key:
+        st.error("Ingresa tu API Key gratuita de Google AI Studio en el panel izquierdo para activar los agentes.")
+        st.stop()
+
+    os.environ["GEMINI_API_KEY"] = api_key
+    resultado_final = None
+
     with st.status("🤖 Agentes operando autónomamente... (Observa el flujo en tiempo real)", expanded=True) as status:
-        st.write("⏳ **Fase 1:** El *Agente Investigador* está consultando estándares curriculares en la web...")
+        st.write(f"⏳ **Fase 1:** Conectando con `{modelo_elegido}` — El *Agente Investigador* está consultando estándares curriculares...")
 
         def registrar_avance(output):
             st.write(f"✅ **Tarea completada por:** `{output.agent}` — Transfiriendo resultados al siguiente agente...")
 
-        equipo_agentes = Crew(
-            agents=[investigador, arquitecto, auditor],
-            tasks=[tarea_1, tarea_2, tarea_3],
-            process=Process.sequential,
-            task_callback=registrar_avance
-        )
-
-        resultado_final = equipo_agentes.kickoff()
-        status.update(label="✨ Ejecución multi-agente finalizada y auditada con éxito", state="complete", expanded=False)
+        try:
+            resultado_final = ejecutar_equipo_agentes(modelo_elegido, api_key, registrar_avance)
+            status.update(label="✨ Ejecución multi-agente finalizada y auditada con éxito", state="complete", expanded=False)
+        except Exception as error_principal:
+            modelo_respaldo = "gemini/gemini-3.8-flash-lite" if modelo_elegido != "gemini/gemini-3.8-flash-lite" else "gemini/gemini-3.8-pro"
+            st.warning(f"⚠️ Alta demanda temporal en `{modelo_elegido}`. Cambiando automáticamente al motor de respaldo `{modelo_respaldo}`...")
+            try:
+                resultado_final = ejecutar_equipo_agentes(modelo_respaldo, api_key, registrar_avance)
+                status.update(label="✨ Ejecución multi-agente finalizada mediante motor de respaldo", state="complete", expanded=False)
+            except Exception as error_final:
+                status.update(label="⚠️ Servidores de Google temporalmente saturados", state="error", expanded=True)
+                st.error(
+                    f"Los servidores gratuitos de Google reportan congestión temporal ({type(error_final).__name__}). "
+                    "Espera 20 segundos y vuelve a presionar el botón."
+                )
+                st.stop()
 
     st.divider()
     m1, m2, m3 = st.columns(3)
