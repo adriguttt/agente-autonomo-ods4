@@ -72,7 +72,7 @@ if st.button("🚀 Iniciar Ejecución Autónoma de Agentes", type="primary", use
 
     os.environ["GEMINI_API_KEY"] = api_key
     llm_gemini = LLM(
-        model="gemini/gemini-2.5-flash",
+        model="gemini/gemini-3.8-flash",
         api_key=api_key,
         temperature=0.4
     )
