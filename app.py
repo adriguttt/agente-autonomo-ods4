@@ -17,13 +17,13 @@ from google import genai
 from duckduckgo_search import DDGS
 
 st.set_page_config(
-    page_title="AGENTE IA AUTÓNOMO | ODS 4",
+    page_title="AGENTE IA ULIMA | Alumnos y Postulantes (ODS 4)",
     page_icon="🎓",
     layout="wide"
 )
 
-ARCHIVO_WORD_PATH = "/tmp/Modulo_Educativo_ODS4.docx"
-ARCHIVO_ICS_PATH = "/tmp/Sesion_Clase_ODS4.ics"
+ARCHIVO_WORD_PATH = "/tmp/Guia_ULima_ODS4.docx"
+ARCHIVO_ICS_PATH = "/tmp/Sesion_Estudio_ULima.ics"
 
 
 def buscar_web_rapido(consulta: str) -> tuple[str, str]:
@@ -32,11 +32,11 @@ def buscar_web_rapido(consulta: str) -> tuple[str, str]:
         with DDGS() as ddgs:
             resultados = list(ddgs.text(consulta, max_results=3))
         if not resultados:
-            return "Base curricular UNESCO ODS 4.", f"[{hora}] 🔍 Web Search: consulta completada (base interna)"
+            return "Lineamientos universitarios y de acceso educativo ODS 4 (Meta 4.3 UNESCO).", f"[{hora}] 🔍 Web Search: consulta completada (base académica)"
         texto = "\n".join([f"- {r['title']}: {r['body']} ({r['href']})" for r in resultados])
-        return texto, f"[{hora}] 🔍 Web Search conectado: {len(resultados)} fuentes encontradas"
+        return texto, f"[{hora}] 🔍 Web Search conectado: {len(resultados)} referencias académicas halladas"
     except Exception:
-        return "Estándares internacionales UNESCO Metas 4.1 y 4.5.", f"[{hora}] 🔍 Web Search: modo respaldo curricular activo"
+        return "Estándares de acceso y calidad en educación superior UNESCO ODS 4.", f"[{hora}] 🔍 Web Search: modo respaldo académico activo"
 
 
 def buscar_wikipedia_rapido(concepto: str) -> tuple[str, str]:
@@ -44,7 +44,7 @@ def buscar_wikipedia_rapido(concepto: str) -> tuple[str, str]:
     try:
         termino = urllib.parse.quote(concepto.strip().split()[0])
         url = f"https://es.wikipedia.org/api/rest_v1/page/summary/{termino}"
-        req = urllib.request.Request(url, headers={"User-Agent": "AgenteEducativoODS4/2.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "AgenteULimaODS4/3.0"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             datos = json.loads(resp.read().decode("utf-8"))
         extracto = datos.get("extract", "")
@@ -56,7 +56,7 @@ def buscar_wikipedia_rapido(concepto: str) -> tuple[str, str]:
 
 
 def obtener_modelos_activos(client: genai.Client, modelo_preferido: str) -> list[str]:
-    prioridad = [modelo_preferido, "gemini-3.8-flash", "gemini-3.8-pro"]
+    prioridad = [modelo_preferido, "gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.5-flash"]
     detectados = []
     try:
         for m in client.models.list():
@@ -81,7 +81,7 @@ def obtener_modelos_activos(client: genai.Client, modelo_preferido: str) -> list
 def llamar_gemini_blindado(client: genai.Client, prompt: str, modelos_activos: list[str]) -> tuple[str, str]:
     ultimo_error = ""
     for modelo in modelos_activos:
-        for intento in range(2):
+        for _ in range(2):
             try:
                 respuesta = client.models.generate_content(
                     model=modelo,
@@ -95,19 +95,19 @@ def llamar_gemini_blindado(client: genai.Client, prompt: str, modelos_activos: l
                     raise ValueError("La API Key ingresada no es válida. Verifica que empiece con 'AIza...'.")
                 if "404" in ultimo_error or "NOT_FOUND" in ultimo_error:
                     break
-                time.sleep(2.5)
+                time.sleep(2.0)
 
-    raise RuntimeError(f"Google Gemini está saturado en este instante. Espera 15 segundos y vuelve a intentar. ({ultimo_error[:140]})")
+    raise RuntimeError(f"Los servidores gratuitos de Google están saturados en este instante. Espera 15 segundos y reintenta. ({ultimo_error[:120]})")
 
 
-def generar_archivos_locales(titulo: str, contenido_md: str, inicio_dt: datetime, fin_dt: datetime) -> list[str]:
+def generar_archivos_ulima(perfil: str, tema: str, detalle_perfil: str, contenido_md: str, inicio_dt: datetime, fin_dt: datetime) -> list[str]:
     logs = []
     hora = datetime.now().strftime("%H:%M:%S")
 
     doc = Document()
-    doc.add_heading("SISTEMA MULTI-AGENTE AUTÓNOMO — ODS 4 (UNESCO)", level=0)
-    doc.add_heading(titulo, level=1)
-    doc.add_paragraph(f"Fecha de emisión: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    doc.add_heading("UNIVERSIDAD DE LIMA — ASISTENTE ACADÉMICO IA (ODS 4)", level=0)
+    doc.add_heading(f"{tema} | {detalle_perfil}", level=1)
+    doc.add_paragraph(f"Perfil: {perfil} | Generado el {datetime.now().strftime('%d/%m/%Y a las %H:%M')}")
 
     for linea in contenido_md.split("\n"):
         limpia = linea.strip()
@@ -122,23 +122,23 @@ def generar_archivos_locales(titulo: str, contenido_md: str, inicio_dt: datetime
         else:
             doc.add_paragraph(limpia.replace("**", ""))
     doc.save(ARCHIVO_WORD_PATH)
-    logs.append(f"[{hora}] 📄 Documento Word (.docx) generado correctamente")
+    logs.append(f"[{hora}] 📄 Guía Word (.docx) generada ({perfil})")
 
     ics_texto = (
         "BEGIN:VCALENDAR\n"
         "VERSION:2.0\n"
-        "PRODID:-//Agente Autonomo ODS 4//Educacion de Calidad//ES\n"
+        "PRODID:-//Agente IA ULima ODS 4//Alumnos y Postulantes//ES\n"
         "BEGIN:VEVENT\n"
         f"DTSTART:{inicio_dt.strftime('%Y%m%dT%H%M%S')}\n"
         f"DTEND:{fin_dt.strftime('%Y%m%dT%H%M%S')}\n"
-        f"SUMMARY:Clase ODS 4 - {titulo}\n"
-        "DESCRIPTION:Módulo educativo diseñado y auditado por Agente IA Autónomo (Metas 4.1 y 4.5 UNESCO).\n"
+        f"SUMMARY:Estudio ULima - {tema}\n"
+        f"DESCRIPTION:Sesión guiada ({perfil} - {detalle_perfil}) generada por Agente IA ULima (ODS 4).\n"
         "END:VEVENT\n"
         "END:VCALENDAR\n"
     )
     with open(ARCHIVO_ICS_PATH, "w", encoding="utf-8") as f:
         f.write(ics_texto)
-    logs.append(f"[{hora}] 📅 Invitación de Calendario (.ics) generada correctamente")
+    logs.append(f"[{hora}] 📅 Bloque de estudio en Calendario (.ics) generado")
 
     return logs
 
@@ -150,7 +150,7 @@ def enviar_gmail_real(remitente: str, clave_app: str, destinatario: str, asunto:
     destinatario = destinatario.strip()
 
     if not remitente or not clave_app or not destinatario:
-        return f"[{hora}] 📧 Gmail: omitido (completa correo y clave de aplicación en el panel izquierdo para enviar)"
+        return f"[{hora}] 📧 Gmail: listo (agrega tu Gmail y clave de aplicación a la izquierda para enviarlo)"
 
     try:
         msg = MIMEMultipart()
@@ -159,17 +159,17 @@ def enviar_gmail_real(remitente: str, clave_app: str, destinatario: str, asunto:
         msg["Subject"] = asunto
 
         cuerpo = (
-            "Hola,\n\n"
-            "El Sistema Multi-Agente Autónomo (ODS 4: Educación de Calidad) ha finalizado tu módulo educativo.\n"
-            "Adjunto encontrarás el documento en Word (.docx) y la invitación de clase para Calendario (.ics).\n\n"
+            "¡Hola!\n\n"
+            "Tu Asistente Académico Autónomo ULima (ODS 4) ha preparado tu material de estudio personalizado.\n"
+            "Adjunto encontrarás la guía completa en Word (.docx) lista para repasar e imprimir y el evento para tu Google Calendar (.ics).\n\n"
             "------------------------------------------------------------\n"
             f"{contenido[:3500]}\n"
             "------------------------------------------------------------\n"
-            "Enviado automáticamente por Agente IA ODS 4."
+            "Facilitación Académica y Acceso Universitario — Agente IA ULima (ODS 4)."
         )
         msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
 
-        for ruta, nombre in [(ARCHIVO_WORD_PATH, "Modulo_Educativo_ODS4.docx"), (ARCHIVO_ICS_PATH, "Sesion_Clase_ODS4.ics")]:
+        for ruta, nombre in [(ARCHIVO_WORD_PATH, "Guia_ULima_ODS4.docx"), (ARCHIVO_ICS_PATH, "Sesion_Estudio_ULima.ics")]:
             if os.path.exists(ruta):
                 with open(ruta, "rb") as f:
                     adj = MIMEBase("application", "octet-stream")
@@ -193,93 +193,161 @@ def enviar_alertas_push(webhook_url: str, tg_token: str, tg_chat_id: str, resume
 
     if webhook_url.strip():
         try:
-            data = json.dumps({"content": f"🎓 **Agente Autónomo ODS 4 completado:**\n{resumen[:1500]}"}).encode("utf-8")
-            req = urllib.request.Request(webhook_url.strip(), data=data, headers={"Content-Type": "application/json", "User-Agent": "AgenteODS4/2.0"})
+            data = json.dumps({"content": f"🎓 **Agente IA ULima (ODS 4) — Material Listo:**\n{resumen[:1500]}"}).encode("utf-8")
+            req = urllib.request.Request(webhook_url.strip(), data=data, headers={"Content-Type": "application/json", "User-Agent": "AgenteULimaODS4/3.0"})
             urllib.request.urlopen(req, timeout=6)
-            logs.append(f"[{hora}] 💬 Discord/Slack Webhook notificado en vivo")
+            logs.append(f"[{hora}] 💬 Grupo de estudio en Discord/Slack notificado")
         except Exception as e:
             logs.append(f"[{hora}] ⚠️ Error Webhook: {str(e)}")
 
     if tg_token.strip() and tg_chat_id.strip():
         try:
             url = f"https://api.telegram.org/bot{tg_token.strip()}/sendMessage"
-            data = json.dumps({"chat_id": tg_chat_id.strip(), "text": f"🎓 Agente Autónomo ODS 4:\n\n{resumen[:1500]}"}).encode("utf-8")
+            data = json.dumps({"chat_id": tg_chat_id.strip(), "text": f"🎓 Agente IA ULima (ODS 4):\n\n{resumen[:1500]}"}).encode("utf-8")
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=6)
-            logs.append(f"[{hora}] 📲 Telegram notificado en vivo (Chat {tg_chat_id.strip()})")
+            logs.append(f"[{hora}] 📲 Telegram notificado (Chat {tg_chat_id.strip()})")
         except Exception as e:
             logs.append(f"[{hora}] ⚠️ Error Telegram: {str(e)}")
 
     if not logs:
-        logs.append(f"[{hora}] 💬 Notificaciones Push: listas (puedes agregar Discord o Telegram en el panel izquierdo)")
+        logs.append(f"[{hora}] 💬 Alertas Push: disponibles (conecta Discord o Telegram en el panel izquierdo)")
     return logs
 
 
+# --- BARRA LATERAL ---
 with st.sidebar:
-    st.title("⚙️ Centro de Conexiones")
-    st.caption("Ecosistema Multi-Agente Rápido (ODS 4)")
+    st.title("⚙️ Núcleo Agente ULima")
+    st.caption("Postulantes y Alumnos — ODS 4")
     api_key = st.text_input(
         "🔑 Google AI Studio API Key (Obligatorio)",
         type="password",
         help="Tu clave gratuita que empieza con AIza..."
     )
     modelo_elegido = st.selectbox(
-        "⚡ Motor Principal Gemini",
+        "⚡ Motor Gemini",
         ["gemini-3.8-flash", "gemini-3.8-pro"]
     )
 
     st.divider()
-    with st.expander("📧 1. Gmail (Envío + Adjuntos)", expanded=True):
-        gmail_user = st.text_input("Tu correo Gmail", placeholder="tu.correo@gmail.com")
+    with st.expander("📧 1. Enviar al Correo (Gmail)", expanded=True):
+        gmail_user = st.text_input("Tu correo Gmail (remitente)", placeholder="tu.correo@gmail.com")
         gmail_pass = st.text_input("Contraseña de Aplicación (16 letras)", type="password")
-        correo_destino = st.text_input("Correo destinatario", placeholder="docente@gmail.com")
+        correo_destino = st.text_input("Correo del alumno o postulante", placeholder="postulante@gmail.com / @aloe.ulima.edu.pe")
 
-    with st.expander("📅 2. Google Calendar (Agendar Sesión)", expanded=False):
-        fecha_clase = st.date_input("Fecha de la clase", value=datetime.now().date() + timedelta(days=1))
-        hora_clase = st.time_input("Hora de inicio", value=datetime.strptime("09:00", "%H:%M").time())
+    with st.expander("📅 2. Agendar Estudio (Google Calendar)", expanded=False):
+        fecha_clase = st.date_input("Fecha de repaso / simulacro", value=datetime.now().date() + timedelta(days=1))
+        hora_clase = st.time_input("Hora de inicio", value=datetime.strptime("18:00", "%H:%M").time())
 
-    with st.expander("💬 3. Discord / Telegram (Alertas Push)", expanded=False):
-        webhook_url = st.text_input("Webhook URL (Discord/Slack)", placeholder="https://discord.com/api/webhooks/...")
+    with st.expander("💬 3. Grupo de Estudio (Discord / Telegram)", expanded=False):
+        webhook_url = st.text_input("Webhook Discord / Slack", placeholder="https://discord.com/api/webhooks/...")
         tg_token = st.text_input("Telegram Bot Token", type="password")
         tg_chat_id = st.text_input("Telegram Chat ID", placeholder="123456789")
 
     st.divider()
-    st.markdown("**6 Conexiones Integradas:**")
-    st.markdown("✅ Buscador Web en Vivo")
+    st.markdown("**6 Herramientas Conectadas:**")
+    st.markdown("✅ Buscador Académico Web")
     st.markdown("✅ API Oficial Wikipedia")
-    st.markdown("✅ Generador Word (`.docx`)")
+    st.markdown("✅ Guía Word ULima (`.docx`)")
     st.markdown("✅ Google Calendar (`.ics` + Link)")
-    st.markdown("✅ Envío Autónomo Gmail")
+    st.markdown("✅ Envío Automático Gmail")
     st.markdown("✅ Alertas Discord / Telegram")
 
-st.title("🎓 APLICACIÓN DE UNA AGENTE IA — ODS 4: Educación de Calidad")
+# --- PANTALLA PRINCIPAL ---
+st.title("🎓 AGENTE IA ULIMA — Postulantes y Alumnos (ODS 4)")
 st.markdown(
-    "Sistema multi-agente de alta velocidad conectado a **Web Search, Wikipedia, Word (.docx), Google Calendar, Gmail y Discord/Telegram** "
-    "para el cumplimiento de las **Metas 4.1 y 4.5 de la UNESCO**."
+    "Sistema multi-agente autónomo diseñado para **facilitar tanto el ingreso de postulantes como el éxito académico de los alumnos en la Universidad de Lima**, "
+    "democratizando el acceso a tutorías personalizadas y materiales listos en **Word, Calendar y Correo** (**Metas 4.3, 4.4 y 4.5 de la UNESCO**)."
 )
 
+perfil = st.radio(
+    "Selecciona tu perfil en la comunidad ULima:",
+    [
+        "🚀 Postulante a la ULima (Admisión / CEPREULIMA / Escolar)",
+        "🎓 Alumno Regular ULima (Estudios Generales / Facultad)"
+    ],
+    horizontal=True
+)
+
+st.divider()
+
 col1, col2, col3 = st.columns(3)
-with col1:
-    tema = st.text_input("Tema o competencia académica", value="Comprensión lectora y pensamiento crítico")
-with col2:
-    nivel = st.selectbox("Nivel educativo", ["Primaria (5.º - 6.º)", "Secundaria (1.º - 3.º)", "Secundaria (4.º - 5.º)", "Nivelación Preuniversitaria"])
-with col3:
-    contexto = st.selectbox(
-        "Contexto de inclusión (Meta 4.5)",
-        [
-            "Zona rural con conectividad limitada (material imprimible)",
-            "Estudiantes con rezago escolar y baja comprensión base",
-            "Aula multigrado con recursos tecnológicos mínimos",
-            "Estudiantes neurodivergentes (lectura fácil y estructura visual)"
-        ]
+
+if "Postulante" in perfil:
+    with col1:
+        detalle_perfil = st.selectbox(
+            "Modalidad de Postulación",
+            [
+                "Examen de Admisión General",
+                "CEPREULIMA (Ciclo Preuniversitario)",
+                "Colegio / Tercios Superiores / Bachillerato",
+                "Nivelación Base antes del Primer Ciclo (EE.GG.)",
+                "Orientación Vocacional y Elección de Carrera ULima"
+            ]
+        )
+    with col2:
+        tema = st.text_input(
+            "Materia o tema de admisión a reforzar",
+            value="Razonamiento Lógico-Matemático y Comprensión Lectora"
+        )
+    with col3:
+        necesidad = st.selectbox(
+            "¿Cómo te ayudamos a ingresar?",
+            [
+                "Simulacro guiado con preguntas tipo examen ULima y trucos rápidos",
+                "Explicación desde cero (cerrar brechas del colegio sin estrés)",
+                "Plan de estudio semanal listo para agendar en Google Calendar",
+                "Guía puente: cómo aprobar fácil los cursos de Estudios Generales"
+            ]
+        )
+    valor_default_mision = (
+        "Explícalo de forma clara desde cero, incluye atajos y trucos para resolver preguntas rápido en el examen de admisión de la ULima, "
+        "4 preguntas tipo examen con alternativas y solución paso a paso, y consejos para asegurar el ingreso."
+    )
+else:
+    with col1:
+        detalle_perfil = st.selectbox(
+            "Carrera / Facultad ULima",
+            [
+                "Estudios Generales (EE.GG.)",
+                "Ingeniería de Sistemas",
+                "Ingeniería Industrial",
+                "Administración",
+                "Negocios Internacionales",
+                "Comunicación",
+                "Derecho",
+                "Economía",
+                "Psicología",
+                "Arquitectura"
+            ]
+        )
+    with col2:
+        tema = st.text_input(
+            "Curso o tema difícil a simplificar",
+            value="Inteligencia Artificial aplicada a los Negocios"
+        )
+    with col3:
+        necesidad = st.selectbox(
+            "¿Cómo te facilitamos el curso hoy?",
+            [
+                "Preparación rápida para Examen Parcial / Final (resumen + preguntas tipo)",
+                "Explicar teoría difícil desde cero con ejemplos prácticos del Perú",
+                "Guía paso a paso para Trabajo Grupal / Proyecto de Investigación",
+                "Plan de estudio anti-estrés con cronograma listo para Calendar",
+                "Lectura accesible y estructurada sin tecnicismos innecesarios (ODS 4.5)"
+            ]
+        )
+    valor_default_mision = (
+        "Explícalo de forma directa y fácil de entender, incluye ejemplos aplicados a empresas reales en el Perú, "
+        "3 ejercicios resueltos paso a paso tipo evaluación de la ULima y un checklist rápido para asegurar buena nota."
     )
 
 objetivo_extra = st.text_area(
-    "Misión autónoma para los agentes",
-    value="Diseña un módulo completo de nivelación de 90 minutos con lectura adaptada, analogías cotidianas, actividad práctica sin internet, ejercicios progresivos con solucionario y rúbrica ODS 4."
+    "Detalle adicional o meta específica",
+    value=valor_default_mision
 )
 
-if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_container_width=True):
+if st.button("⚡ Ejecutar Agente Autónomo ULima", type="primary", use_container_width=True):
     if not api_key:
         st.error("Ingresa tu API Key de Google AI Studio en el panel izquierdo.")
         st.stop()
@@ -288,14 +356,20 @@ if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_cont
     bitacora = []
     inicio_dt = datetime.combine(fecha_clase, hora_clase)
     fin_dt = inicio_dt + timedelta(minutes=90)
+    es_postulante = "Postulante" in perfil
 
     try:
         client = genai.Client(api_key=api_key.strip())
 
-        with st.status("⚡ Ejecutando agentes y conexiones externas en paralelo...", expanded=True) as status:
-            st.write("🔍 **Fase 1/3:** *Agente Investigador* consultando Web Search y Wikipedia en paralelo...")
+        with st.status("⚡ Agentes trabajando para facilitar tu camino en la ULima...", expanded=True) as status:
+            st.write("🔍 **Fase 1/3:** *Agente Investigador Académico* consultando fuentes y temarios en paralelo...")
+            query_busqueda = (
+                f"Universidad de Lima admision CEPREULIMA {tema} temario"
+                if es_postulante else
+                f"Universidad de Lima {tema} {detalle_perfil} conceptos clave"
+            )
             with ThreadPoolExecutor(max_workers=3) as pool:
-                futuro_web = pool.submit(buscar_web_rapido, f"UNESCO ODS 4 {tema} {nivel}")
+                futuro_web = pool.submit(buscar_web_rapido, query_busqueda)
                 futuro_wiki = pool.submit(buscar_wikipedia_rapido, tema)
                 futuro_modelos = pool.submit(obtener_modelos_activos, client, modelo_elegido)
                 info_web, log_web = futuro_web.result()
@@ -304,62 +378,85 @@ if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_cont
 
             bitacora.extend([log_web, log_wiki])
 
-            prompt_investigador = (
-                f"Eres el Agente Investigador Curricular (UNESCO ODS 4). Sintetiza en 5 viñetas claras los estándares pedagógicos "
-                f"y criterios de inclusión (Metas 4.1 y 4.5) para enseñar '{tema}' en '{nivel}' bajo el contexto '{contexto}'.\n"
-                f"Fuentes web:\n{info_web}\nConcepto Wikipedia:\n{info_wiki}"
-            )
+            if es_postulante:
+                prompt_investigador = (
+                    f"Eres el Agente Investigador de Admisión y Nivelación para postulantes a la Universidad de Lima (modalidad: {detalle_perfil}). "
+                    f"Sintetiza en 5 puntos clave qué evalúa la ULima y qué bases necesita dominar un postulante sobre '{tema}' "
+                    f"para cumplir '{necesidad}' (ODS 4 Meta 4.3: acceso equitativo a la educación superior).\nFuentes:\n{info_web}\nWikipedia:\n{info_wiki}"
+                )
+            else:
+                prompt_investigador = (
+                    f"Eres el Agente Investigador Académico para alumnos de {detalle_perfil} en la Universidad de Lima (ULima). "
+                    f"Sintetiza en 5 puntos claros los conceptos esenciales y enfoques prácticos sobre '{tema}' "
+                    f"para resolver '{necesidad}'.\nFuentes:\n{info_web}\nWikipedia:\n{info_wiki}"
+                )
+
             hallazgos, modelo_usado = llamar_gemini_blindado(client, prompt_investigador, modelos_activos)
             modelos_priorizados = [modelo_usado] + [m for m in modelos_activos if m != modelo_usado]
             bitacora.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🧠 Agente Investigador completado ({modelo_usado})")
 
-            st.write("🏗️ **Fase 2/3:** *Agente Arquitecto Pedagógico* construyendo el módulo adaptado...")
-            prompt_arquitecto = (
-                f"Eres el Agente Arquitecto Pedagógico Inclusivo. Basándote en esta investigación:\n{hallazgos}\n\n"
-                f"Redacta un módulo educativo completo en Markdown sobre '{tema}' para '{nivel}' adaptado a '{contexto}'. "
-                f"Directriz: {objetivo_extra}.\n"
-                f"Estructura obligatoria: 1) Objetivos de aprendizaje, 2) Explicación clara con analogías cotidianas, "
-                f"3) Actividad práctica sin depender de internet, 4) Tres ejercicios de dificultad progresiva con solucionario."
-            )
-            borrador_modulo, modelo_usado = llamar_gemini_blindado(client, prompt_arquitecto, modelos_priorizados)
-            bitacora.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🏗️ Agente Arquitecto completado ({modelo_usado})")
+            st.write("💡 **Fase 2/3:** *Agente Tutor Facilitador* preparando explicaciones claras y ejercicios paso a paso...")
+            if es_postulante:
+                prompt_tutor = (
+                    f"Eres el Agente Tutor Preuniversitario de la Universidad de Lima. Tu misión es ayudar a que un postulante ({detalle_perfil}) "
+                    f"entienda todo fácil y logre su ingreso sin sentirse abrumado. Con base en:\n{hallazgos}\n\n"
+                    f"Crea una guía súper clara en Markdown sobre '{tema}' enfocada en '{necesidad}'. Pedido: {objetivo_extra}.\n"
+                    f"Incluye: 1) Explicación desde cero en palabras simples ('De cero a experto'), "
+                    f"2) Atajos y trucos de resolución rápida para ganar tiempo en el examen, "
+                    f"3) 4 preguntas tipo examen de admisión ULima (con alternativas A, B, C, D y solución detallada paso a paso), "
+                    f"4) Conexión con la universidad (cómo te servirá esto en Estudios Generales ULima)."
+                )
+            else:
+                prompt_tutor = (
+                    f"Eres el Agente Tutor Facilitador de la Universidad de Lima. Tu misión es hacerle la vida fácil al alumno de {detalle_perfil} "
+                    f"eliminando el relleno académico innecesario. Con base en:\n{hallazgos}\n\n"
+                    f"Crea una guía súper clara en Markdown sobre '{tema}' enfocada en '{necesidad}'. Pedido: {objetivo_extra}.\n"
+                    f"Incluye: 1) Resumen ejecutivo en lenguaje sencillo ('En palabras simples'), "
+                    f"2) Ejemplos prácticos aplicados a empresas reales en el Perú, "
+                    f"3) 3 ejercicios o casos resueltos paso a paso tipo evaluación ULima, "
+                    f"4) Errores típicos que debes evitar en el examen."
+                )
 
-            st.write("🛡️ **Fase 3/3:** *Agente Auditor ODS 4* evaluando equidad, creando rúbrica y sincronizando salidas...")
+            borrador_guia, modelo_usado = llamar_gemini_blindado(client, prompt_tutor, modelos_priorizados)
+            bitacora.append(f"[{datetime.now().strftime('%H:%M:%S')}] 💡 Agente Tutor Facilitador completado ({modelo_usado})")
+
+            st.write("🛡️ **Fase 3/3:** *Agente Auditor ODS 4* validando claridad, creando checklist y sincronizando herramientas...")
             prompt_auditor = (
-                f"Eres el Agente Auditor de Calidad Educativa y Equidad ODS 4. Revisa este módulo diseñado para '{contexto}':\n\n"
-                f"{borrador_modulo}\n\n"
-                f"Devuelve la VERSIÓN FINAL CERTIFICADA en Markdown encabezada por:\n"
-                f"- **Índice de Alineación ODS 4:** [Puntaje/100] y breve justificación de equidad.\n"
-                f"- Todo el contenido pedagógico mejorado y listo para usar en clase.\n"
-                f"- Al final, una **Tabla de Rúbrica de Evaluación** con niveles: Inicio, En Proceso y Logrado."
+                f"Eres el Agente Auditor de Accesibilidad y Calidad Educativa (ODS 4 - UNESCO) para la comunidad ULima ({perfil}). "
+                f"Revisa esta guía:\n\n{borrador_guia}\n\n"
+                f"Entrega la GUÍA FINAL LISTA PARA ESTUDIAR en Markdown encabezada por:\n"
+                f"- **Índice de Facilitación y Acceso ULima (ODS 4):** [Puntaje/100] y justificación de cómo reduce barreras de aprendizaje.\n"
+                f"- Todo el contenido optimizado, claro y directo.\n"
+                f"- Al final, un **Checklist Rápido de Dominio** (tabla Markdown con: Tema Clave | ¿Lo domino? | Tip de memoria rápida)."
             )
-            modulo_final, modelo_usado = llamar_gemini_blindado(client, prompt_auditor, modelos_priorizados)
-            bitacora.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🛡️ Agente Auditor completado ({modelo_usado})")
+            guia_final, modelo_usado = llamar_gemini_blindado(client, prompt_auditor, modelos_priorizados)
+            bitacora.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🛡️ Agente Auditor ODS 4 completado ({modelo_usado})")
 
-            logs_archivos = generar_archivos_locales(tema, modulo_final, inicio_dt, fin_dt)
+            logs_archivos = generar_archivos_ulima(perfil, tema, detalle_perfil, guia_final, inicio_dt, fin_dt)
             bitacora.extend(logs_archivos)
 
+            etiqueta_corto = "Postulante ULima" if es_postulante else "Alumno ULima"
             with ThreadPoolExecutor(max_workers=2) as pool_envios:
                 futuro_gmail = pool_envios.submit(
                     enviar_gmail_real,
                     gmail_user,
                     gmail_pass,
                     correo_destino,
-                    f"Módulo Educativo ODS 4: {tema} ({nivel})",
-                    modulo_final
+                    f"Guía Fácil {etiqueta_corto} (ODS 4): {tema}",
+                    guia_final
                 )
                 futuro_push = pool_envios.submit(
                     enviar_alertas_push,
                     webhook_url,
                     tg_token,
                     tg_chat_id,
-                    f"Tema: {tema} | Nivel: {nivel} | Contexto: {contexto}\n\n{modulo_final[:600]}..."
+                    f"Perfil: {etiqueta_corto} ({detalle_perfil}) | Tema: {tema}\n\n{guia_final[:600]}..."
                 )
                 bitacora.append(futuro_gmail.result())
                 bitacora.extend(futuro_push.result())
 
             duracion = round(time.time() - tiempo_inicio, 1)
-            status.update(label=f"✨ Misión completada en {duracion}s usando {modelo_usado}", state="complete", expanded=False)
+            status.update(label=f"✨ Guía lista en {duracion}s usando {modelo_usado}", state="complete", expanded=False)
 
     except Exception as error_controlado:
         st.warning(f"⚠️ Aviso del sistema: {error_controlado}")
@@ -367,25 +464,25 @@ if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_cont
 
     st.divider()
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Tiempo Total", f"{duracion} seg")
-    m2.metric("Agentes Ejecutados", "3 Autónomos")
-    m3.metric("Conexiones Activas", f"{len(bitacora)} Acciones")
-    m4.metric("Gmail", "Enviado" if correo_destino.strip() and gmail_user.strip() else "Listo")
+    m1.metric("Tiempo de Respuesta", f"{duracion} seg")
+    m2.metric("Perfil Atendido", "Postulante ULima" if es_postulante else "Alumno ULima")
+    m3.metric("Acciones Ejecutadas", f"{len(bitacora)} Herramientas")
+    m4.metric("Envío por Correo", "Enviado" if correo_destino.strip() and gmail_user.strip() else "Listo")
 
-    with st.expander("🛠️ Bitácora en Vivo de Conexiones y Herramientas Ejecutadas", expanded=True):
+    with st.expander("🛠️ Bitácora en Vivo de Acciones Ejecutadas por el Agente", expanded=True):
         for linea_log in bitacora:
             st.code(linea_log, language="text")
 
-    st.subheader("📦 Entregables y Sincronización Directa")
+    st.subheader("📦 Descarga y Sincronización Directa")
     b1, b2, b3, b4 = st.columns(4)
 
     with b1:
         if os.path.exists(ARCHIVO_WORD_PATH):
             with open(ARCHIVO_WORD_PATH, "rb") as f_doc:
                 st.download_button(
-                    label="📄 Descargar Word (.docx)",
+                    label="📄 Guía en Word (.docx)",
                     data=f_doc.read(),
-                    file_name=f"Modulo_ODS4_{tema.replace(' ', '_')}.docx",
+                    file_name=f"Guia_ULima_{tema.replace(' ', '_')}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     use_container_width=True
                 )
@@ -393,27 +490,27 @@ if st.button("⚡ Ejecutar Agente Autónomo Conectado", type="primary", use_cont
         if os.path.exists(ARCHIVO_ICS_PATH):
             with open(ARCHIVO_ICS_PATH, "rb") as f_ics:
                 st.download_button(
-                    label="📅 Invitación Calendario (.ics)",
+                    label="📅 Bloque Estudio (.ics)",
                     data=f_ics.read(),
-                    file_name="Sesion_Clase_ODS4.ics",
+                    file_name="Sesion_Estudio_ULima.ics",
                     mime="text/calendar",
                     use_container_width=True
                 )
     with b3:
         st.download_button(
-            label="📝 Descargar Markdown (.md)",
-            data=modulo_final,
-            file_name=f"Modulo_ODS4_{tema.replace(' ', '_')}.md",
+            label="📝 Resumen Markdown (.md)",
+            data=guia_final,
+            file_name=f"Guia_ULima_{tema.replace(' ', '_')}.md",
             mime="text/markdown",
             use_container_width=True
         )
     with b4:
-        titulo_gcal = urllib.parse.quote(f"Clase ODS 4: {tema}")
-        detalles_gcal = urllib.parse.quote(f"Módulo educativo auditado (Nivel: {nivel} | Contexto: {contexto}).")
+        titulo_gcal = urllib.parse.quote(f"Estudio ULima: {tema}")
+        detalles_gcal = urllib.parse.quote(f"Sesión guiada ({perfil} - {detalle_perfil}) - {necesidad}.")
         fechas_gcal = f"{inicio_dt.strftime('%Y%m%dT%H%M%S')}/{fin_dt.strftime('%Y%m%dT%H%M%S')}"
         url_gcal = f"https://calendar.google.com/calendar/render?action=TEMPLATE&text={titulo_gcal}&dates={fechas_gcal}&details={detalles_gcal}"
         st.link_button("🗓️ Agendar en Google Calendar", url_gcal, use_container_width=True)
 
     st.divider()
-    st.subheader("📄 Módulo Educativo Generado y Auditado")
-    st.markdown(modulo_final)
+    st.subheader(f"📘 Guía Personalizada — {'Postulantes' if es_postulante else 'Alumnos'} Universidad de Lima")
+    st.markdown(guia_final)
