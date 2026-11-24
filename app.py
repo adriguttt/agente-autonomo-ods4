@@ -1,4 +1,6 @@
 import os
+import re
+import time
 import socket
 
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
@@ -24,6 +26,7 @@ from google.genai import types
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
 # ==============================================================================
@@ -48,24 +51,47 @@ SCOPES = [
     "https://www.googleapis.com/auth/forms.body",
 ]
 
+REQUIRED_WORKSPACE_SCOPES = {
+    "https://www.googleapis.com/auth/gmail.modify": "Gmail",
+    "https://www.googleapis.com/auth/calendar": "Calendar",
+    "https://www.googleapis.com/auth/drive.file": "Drive (Docs/Slides/Sheets)",
+    "https://www.googleapis.com/auth/tasks": "Tasks",
+    "https://www.googleapis.com/auth/contacts.readonly": "Contactos",
+    "https://www.googleapis.com/auth/forms.body": "Forms",
+}
+
 MODELOS_DISPONIBLES = [
     "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
 ]
 
 
-def get_active_gemini_key() -> str:
-    clave_manual = st.session_state.get("custom_gemini_key", "").strip()
-    return clave_manual if clave_manual else st.secrets["GEMINI_API_KEY"]
+def get_gemini_keys() -> list[str]:
+    claves = []
+    manual = st.session_state.get("custom_gemini_key", "").strip()
+    if manual:
+        claves.append(manual)
+    secret_raw = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
+    for k in secret_raw.split(","):
+        k_clean = k.strip()
+        if k_clean and k_clean not in claves:
+            claves.append(k_clean)
+    return claves
+
+
+def log_tool(nombre: str) -> None:
+    st.session_state.setdefault("tool_logs", []).append(nombre)
 
 
 def get_system_instruction() -> str:
     ahora_lima = datetime.datetime.now(ZoneInfo("America/Lima")).strftime(
         "%Y-%m-%d %H:%M (%A)"
     )
+    usuario = st.session_state.get("user_email", "Modo Rápido (sin cuenta Google)")
     return f"""
 Eres el Agente IA Autónomo de la Universidad de Lima enfocado en el ODS 4 (Educación de Calidad).
 Ayudas a estudiantes, docentes y postulantes a investigar, estudiar, gestionar su tiempo y automatizar tareas reales.
+Usuario conectado actualmente: {usuario}.
 
 Conocimiento base ULima (14 carreras de pregrado):
 1. Administración
@@ -83,11 +109,12 @@ Conocimiento base ULima (14 carreras de pregrado):
 13. Negocios Internacionales
 14. Psicología
 
-Reglas de ejecución:
+Reglas estrictas de ejecución:
 - Ejecuta las herramientas disponibles de forma autónoma y encadenada cuando el usuario pida varias acciones en un mismo mensaje.
-- Si el usuario pide enviar un correo a alguien por su nombre (ej. "mándale un correo a Carlos"), busca primero su correo en Google Contactos antes de enviar.
-- Si el usuario pide crear un documento, presentación u hoja de cálculo y enviarlo por Gmail, genera primero el archivo y luego usa gestionar_gmail con adjuntar_ultimo_archivo=True.
-- Responde siempre en español claro, estructurado y con enlaces directos a los recursos creados (Docs, Slides, Sheets, Forms, YouTube o Google Maps).
+- JAMÁS afirmes que enviaste un correo, creaste un archivo, agendaste un evento o creaste una tarea/encuesta si la herramienta no devolvió una confirmación explícita ('ENVIADO_OK', 'ARCHIVO_OK', 'EVENTO_OK', 'TAREA_OK', 'FORM_OK') o si devolvió 'ERROR:'. Si hay un error, explica el motivo exacto al usuario.
+- Para enviar correos usa gestionar_gmail con accion='enviar' y un correo electrónico válido en destinatario. Si solo te dan un nombre (ej. "Carlos"), consulta primero buscar_contactos_google.
+- Si el usuario pide crear un documento, presentación o Excel y enviarlo por Gmail, genera primero el archivo y luego llama a gestionar_gmail con adjuntar_ultimo_archivo=True.
+- Responde siempre en español claro, estructurado y con enlaces directos a los recursos creados.
 - Fecha y hora actual en Lima, Perú: {ahora_lima}
 """
 
@@ -124,11 +151,32 @@ def get_user_credentials() -> Credentials | None:
     return Credentials.from_authorized_user_info(creds_dict)
 
 
+def check_scope(creds: Credentials, required_scope: str) -> bool:
+    granted = set(creds.scopes or [])
+    if not granted:
+        return True
+    return required_scope in granted
+
+
+def format_google_error(servicio: str, err: Exception) -> str:
+    if isinstance(err, HttpError):
+        status = getattr(err.resp, "status", "?")
+        if status == 403:
+            return (
+                f"ERROR: Permiso denegado en {servicio} (403). Verifica que marcaste todas las casillas "
+                f"al iniciar sesión con Google y que la API de {servicio} esté habilitada en Google Cloud."
+            )
+        if status == 401:
+            return "ERROR: La sesión de Google expiró (401). Cierra sesión y vuelve a entrar."
+    return f"ERROR en {servicio}: {err}"
+
+
 # ==============================================================================
-# 2. HERRAMIENTAS AUTÓNOMAS DEL AGENTE (0 CONSUMO EXTRA DE CUOTA GEMINI)
+# 2. HERRAMIENTAS AUTÓNOMAS DEL AGENTE (AISLADAS POR SESIÓN)
 # ==============================================================================
 def buscar_internet(consulta: str) -> str:
     """Busca información actualizada en internet y devuelve títulos, enlaces y resúmenes."""
+    log_tool(f"🌐 Web: {consulta}")
     try:
         resultados = []
         with DDGS(timeout=6) as ddgs:
@@ -157,17 +205,17 @@ def buscar_internet(consulta: str) -> str:
                 items.append(
                     f"- {titulo.get_text(strip=True)}: {snippet.get_text(strip=True) if snippet else ''} (URL: {titulo.get('href', '')})"
                 )
-        return (
-            "\n".join(items)
-            if items
-            else "Sin resultados web adicionales; responde con tu conocimiento actualizado."
-        )
+        if items:
+            return "\n".join(items)
     except Exception:
-        return "Búsqueda web no disponible temporalmente; responde con tu conocimiento académico actualizado."
+        pass
+
+    return "Sin resultados externos en este momento; responde usando tu conocimiento académico actualizado."
 
 
 def leer_pagina_web(url: str) -> str:
     """Extrae el texto principal de una URL pública para analizar artículos o documentos web."""
+    log_tool(f"🔗 URL: {url}")
     try:
         resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
@@ -177,35 +225,38 @@ def leer_pagina_web(url: str) -> str:
         texto = " ".join(soup.stripped_strings)
         return texto[:6000] if texto else "La página no contiene texto legible."
     except Exception as e:
-        return f"No se pudo leer la URL: {e}"
+        return f"ERROR: No se pudo leer la URL: {e}"
 
 
 def buscar_videos_youtube(tema: str, max_resultados: int = 5) -> str:
     """Busca videos educativos, tutoriales o conferencias en YouTube sobre un tema académico."""
-    limite = min(max_resultados, 8)
-    try:
-        yt = build("youtube", "v3", developerKey=get_active_gemini_key())
-        res = (
-            yt.search()
-            .list(
-                part="snippet",
-                q=tema,
-                type="video",
-                maxResults=limite,
-                relevanceLanguage="es",
+    log_tool(f"▶️ YouTube: {tema}")
+    limite = min(max(1, max_resultados), 8)
+    claves = get_gemini_keys()
+    if claves:
+        try:
+            yt = build("youtube", "v3", developerKey=claves[0])
+            res = (
+                yt.search()
+                .list(
+                    part="snippet",
+                    q=tema,
+                    type="video",
+                    maxResults=limite,
+                    relevanceLanguage="es",
+                )
+                .execute()
             )
-            .execute()
-        )
-        items = res.get("items", [])
-        if items:
-            return "\n".join(
-                [
-                    f"- **{it['snippet']['title']}** (Canal: {it['snippet']['channelTitle']}) -> https://www.youtube.com/watch?v={it['id']['videoId']}"
-                    for it in items
-                ]
-            )
-    except Exception:
-        pass
+            items = res.get("items", [])
+            if items:
+                return "\n".join(
+                    [
+                        f"- **{it['snippet']['title']}** (Canal: {it['snippet']['channelTitle']}) -> https://www.youtube.com/watch?v={it['id']['videoId']}"
+                        for it in items
+                    ]
+                )
+        except Exception:
+            pass
 
     try:
         resultados = []
@@ -229,17 +280,20 @@ def gestionar_google_tasks(
     accion: 'listar' o 'crear'.
     fecha_limite: opcional en formato 'YYYY-MM-DD'.
     """
+    log_tool(f"✅ Tasks ({accion})")
     creds = get_user_credentials()
     if not creds:
-        return "Modo Rápido activo: conecta tu cuenta de Google para usar Google Tasks."
+        return "ERROR: Modo Rápido activo. Conecta tu cuenta de Google para usar Google Tasks."
+    if not check_scope(creds, "https://www.googleapis.com/auth/tasks"):
+        return "ERROR: Falta el permiso de Google Tasks. Cierra sesión y vuelve a entrar marcando todas las casillas."
     try:
         service = build("tasks", "v1", credentials=creds)
-        if accion.lower() == "crear" and titulo:
-            body = {"title": titulo, "notes": notas}
-            if fecha_limite:
-                body["due"] = f"{fecha_limite}T23:59:00.000Z"
+        if accion.lower().strip() in ["crear", "create", "agregar", "add"] and titulo:
+            body = {"title": titulo.strip(), "notes": notas}
+            if fecha_limite and re.match(r"^\d{4}-\d{2}-\d{2}$", fecha_limite.strip()):
+                body["due"] = f"{fecha_limite.strip()}T23:59:00.000Z"
             creada = service.tasks().insert(tasklist="@default", body=body).execute()
-            return f"Tarea creada en Google Tasks: '{creada.get('title')}' (ID: {creada.get('id')})."
+            return f"TAREA_OK: Tarea creada en Google Tasks: '{creada.get('title')}' (ID: {creada.get('id')})."
         tareas = (
             service.tasks()
             .list(tasklist="@default", showCompleted=False, maxResults=15)
@@ -255,14 +309,17 @@ def gestionar_google_tasks(
             ]
         )
     except Exception as e:
-        return f"Error en Google Tasks: {e}"
+        return format_google_error("Google Tasks", e)
 
 
 def buscar_contactos_google(nombre_o_correo: str) -> str:
     """Busca personas en Google Contactos del usuario para obtener sus correos o teléfonos."""
+    log_tool(f"👥 Contactos: {nombre_o_correo}")
     creds = get_user_credentials()
     if not creds:
-        return "Modo Rápido activo: conecta tu cuenta de Google para buscar en Contactos."
+        return "ERROR: Modo Rápido activo. Conecta tu cuenta de Google para buscar en Contactos."
+    if not check_scope(creds, "https://www.googleapis.com/auth/contacts.readonly"):
+        return "ERROR: Falta el permiso de Google Contactos. Cierra sesión y vuelve a entrar marcando todas las casillas."
     try:
         people = build("people", "v1", credentials=creds)
         res = (
@@ -284,7 +341,7 @@ def buscar_contactos_google(nombre_o_correo: str) -> str:
             salida.append(f"- {nombre} | Correo: {correo} | Tel: {tel}")
         return "\n".join(salida)
     except Exception as e:
-        return f"Error al buscar en Contactos: {e}"
+        return format_google_error("Google Contactos", e)
 
 
 def crear_formulario_google(
@@ -294,9 +351,12 @@ def crear_formulario_google(
     Crea un formulario o encuesta real en Google Forms con preguntas de respuesta corta.
     preguntas_separadas_por_punto_y_coma: ejemplo '¿Cuál es tu carrera?;¿Qué tema prefieres?'
     """
+    log_tool(f"📝 Forms: {titulo}")
     creds = get_user_credentials()
     if not creds:
-        return "Modo Rápido activo: conecta tu cuenta de Google para crear Google Forms."
+        return "ERROR: Modo Rápido activo. Conecta tu cuenta de Google para crear Google Forms."
+    if not check_scope(creds, "https://www.googleapis.com/auth/forms.body"):
+        return "ERROR: Falta el permiso de Google Forms. Cierra sesión y vuelve a entrar marcando todas las casillas."
     try:
         forms = build("forms", "v1", credentials=creds)
         form_creado = (
@@ -315,11 +375,14 @@ def crear_formulario_google(
                     }
                 }
             )
-        preguntas = [
-            p.strip()
-            for p in preguntas_separadas_por_punto_y_coma.split(";")
-            if p.strip()
-        ]
+        raw_pregs = preguntas_separadas_por_punto_y_coma
+        if ";" in raw_pregs:
+            preguntas = [p.strip() for p in raw_pregs.split(";") if p.strip()]
+        elif "|" in raw_pregs:
+            preguntas = [p.strip() for p in raw_pregs.split("|") if p.strip()]
+        else:
+            preguntas = [p.strip() for p in raw_pregs.split("\n") if p.strip()]
+
         for idx, preg in enumerate(preguntas):
             requests_batch.append(
                 {
@@ -346,12 +409,12 @@ def crear_formulario_google(
         )
         edit_url = f"https://docs.google.com/forms/d/{form_id}/edit"
         return (
-            f"Google Form creado exitosamente:\n"
+            f"FORM_OK: Google Form creado exitosamente:\n"
             f"- Enlace para responder: {responder_url}\n"
             f"- Enlace para editar: {edit_url}"
         )
     except Exception as e:
-        return f"Error al crear Google Form: {e}"
+        return format_google_error("Google Forms", e)
 
 
 def planificar_ruta_google_maps(
@@ -361,6 +424,7 @@ def planificar_ruta_google_maps(
     Calcula distancia, tiempo estimado y genera el enlace oficial de navegación en Google Maps.
     modo: 'driving' (auto), 'walking' (a pie) o 'transit' (transporte público).
     """
+    log_tool(f"🗺️ Maps: {origen} -> {destino}")
     headers = {"User-Agent": "AgenteULimaODS4/1.0"}
     url_maps = (
         f"https://www.google.com/maps/dir/?api=1"
@@ -414,23 +478,33 @@ def gestionar_google_calendar(
     accion: 'listar' o 'agendar'.
     fecha_inicio_iso y fecha_fin_iso: formato 'YYYY-MM-DDTHH:MM:SS' (hora de Lima -05:00).
     """
+    log_tool(f"📅 Calendar ({accion})")
     creds = get_user_credentials()
     if not creds:
-        return "Modo Rápido activo: conecta tu cuenta de Google para usar Calendar."
+        return "ERROR: Modo Rápido activo. Conecta tu cuenta de Google para usar Calendar."
+    if not check_scope(creds, "https://www.googleapis.com/auth/calendar"):
+        return "ERROR: Falta el permiso de Google Calendar. Cierra sesión y vuelve a entrar marcando todas las casillas."
     try:
         cal = build("calendar", "v3", credentials=creds)
-        if accion.lower() == "agendar" and titulo and fecha_inicio_iso:
+        if accion.lower().strip() in ["agendar", "crear", "schedule", "event"] and titulo and fecha_inicio_iso:
+            ini_clean = fecha_inicio_iso.strip()
+            if len(ini_clean) == 10:
+                ini_clean = f"{ini_clean}T09:00:00"
             if not fecha_fin_iso:
-                dt_ini = datetime.datetime.fromisoformat(fecha_inicio_iso)
+                dt_ini = datetime.datetime.fromisoformat(ini_clean)
                 fecha_fin_iso = (dt_ini + datetime.timedelta(hours=1)).isoformat()
+            else:
+                fecha_fin_iso = fecha_fin_iso.strip()
+                if len(fecha_fin_iso) == 10:
+                    fecha_fin_iso = f"{fecha_fin_iso}T10:00:00"
             evento = {
                 "summary": titulo,
                 "description": descripcion,
-                "start": {"dateTime": fecha_inicio_iso, "timeZone": "America/Lima"},
+                "start": {"dateTime": ini_clean, "timeZone": "America/Lima"},
                 "end": {"dateTime": fecha_fin_iso, "timeZone": "America/Lima"},
             }
             creado = cal.events().insert(calendarId="primary", body=evento).execute()
-            return f"Evento agendado: '{titulo}' -> {creado.get('htmlLink')}"
+            return f"EVENTO_OK: Evento agendado en Google Calendar: '{titulo}' -> {creado.get('htmlLink')}"
         ahora = datetime.datetime.now(datetime.timezone.utc).isoformat()
         eventos = (
             cal.events()
@@ -453,7 +527,7 @@ def gestionar_google_calendar(
             ]
         )
     except Exception as e:
-        return f"Error en Google Calendar: {e}"
+        return format_google_error("Google Calendar", e)
 
 
 def gestionar_gmail(
@@ -465,19 +539,38 @@ def gestionar_gmail(
 ) -> str:
     """
     Lee los últimos correos o envía un correo por Gmail (con opción de adjuntar el último archivo creado).
-    accion: 'leer' o 'enviar'.
+    accion: 'enviar' para mandar un correo, o 'leer' para revisar la bandeja.
+    destinatario: dirección de correo electrónico válida (ej. 'usuario@gmail.com').
     """
+    log_tool(f"📧 Gmail ({accion} -> {destinatario or 'bandeja'})")
     creds = get_user_credentials()
     if not creds:
-        return "Modo Rápido activo: conecta tu cuenta de Google para usar Gmail."
+        return "ERROR: Modo Rápido activo. Conecta tu cuenta de Google para usar Gmail."
+    if not check_scope(creds, "https://www.googleapis.com/auth/gmail.modify"):
+        return (
+            "ERROR: Esta cuenta de Google no tiene activo el permiso de Gmail. "
+            "Cierra sesión en la barra lateral, vuelve a entrar con Google y marca todas las casillas de permisos."
+        )
+
     try:
         gmail = build("gmail", "v1", credentials=creds)
-        if accion.lower() == "enviar" and destinatario:
+        if accion.lower().strip() in ["enviar", "send", "mandar", "enviar_correo", "write"]:
+            dest_clean = destinatario.strip()
+            if not dest_clean or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", dest_clean):
+                return (
+                    "ERROR: Dirección de destinatario inválida o vacía. "
+                    "Indica un correo válido (ej. nombre@gmail.com) o búscalo primero en Contactos."
+                )
             msg = EmailMessage()
-            msg["To"] = destinatario
-            msg["Subject"] = asunto or "Mensaje desde Agente IA ULima"
-            msg.set_content(cuerpo or "")
+            msg["To"] = dest_clean
+            msg["Subject"] = asunto.strip() if asunto else "Mensaje desde Agente IA ULima"
+            msg.set_content(
+                cuerpo.strip()
+                if cuerpo
+                else "Hola,\n\nEste mensaje fue enviado por el Agente IA de la Universidad de Lima."
+            )
             ultimo = st.session_state.get("ultimo_archivo")
+            adjuntado_txt = ""
             if adjuntar_ultimo_archivo and ultimo:
                 msg.add_attachment(
                     ultimo["bytes"],
@@ -485,9 +578,18 @@ def gestionar_gmail(
                     subtype="octet-stream",
                     filename=ultimo["nombre"],
                 )
-            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
-            return f"Correo enviado correctamente a {destinatario}."
+                adjuntado_txt = f" con adjunto '{ultimo['nombre']}'"
+
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+            enviado = (
+                gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
+            )
+            remitente = st.session_state.get("user_email", "tu cuenta")
+            return (
+                f"ENVIADO_OK: Correo enviado desde {remitente} hacia {dest_clean}{adjuntado_txt} "
+                f"(ID de mensaje Gmail: {enviado.get('id')})."
+            )
+
         msgs = (
             gmail.users()
             .messages()
@@ -518,11 +620,12 @@ def gestionar_gmail(
             )
         return "\n".join(resumenes)
     except Exception as e:
-        return f"Error en Gmail: {e}"
+        return format_google_error("Gmail", e)
 
 
 def crear_documento_word_y_google_doc(titulo: str, contenido: str) -> str:
     """Crea un archivo Word (.docx) descargable y, si hay sesión Google, lo sube como Google Doc editable."""
+    log_tool(f"📄 Word/Docs: {titulo}")
     doc = Document()
     doc.add_heading(titulo, level=1)
     for parrafo in contenido.split("\n"):
@@ -541,7 +644,7 @@ def crear_documento_word_y_google_doc(titulo: str, contenido: str) -> str:
     )
 
     creds = get_user_credentials()
-    if creds:
+    if creds and check_scope(creds, "https://www.googleapis.com/auth/drive.file"):
         try:
             drive = build("drive", "v3", credentials=creds)
             media = MediaIoBaseUpload(
@@ -557,10 +660,10 @@ def crear_documento_word_y_google_doc(titulo: str, contenido: str) -> str:
                 .create(body=file_meta, media_body=media, fields="id,webViewLink")
                 .execute()
             )
-            return f"Word generado ({nombre_archivo}) y subido a Google Docs: {creado.get('webViewLink')}"
+            return f"ARCHIVO_OK: Word generado ({nombre_archivo}) y subido a Google Docs: {creado.get('webViewLink')}"
         except Exception as e:
-            return f"Word generado para descarga ({nombre_archivo}). Nota Drive: {e}"
-    return f"Documento Word '{nombre_archivo}' generado y listo para descargar en la barra lateral."
+            return f"ARCHIVO_OK: Word generado para descarga local ({nombre_archivo}). Nota Drive: {e}"
+    return f"ARCHIVO_OK: Documento Word '{nombre_archivo}' generado y listo para descargar en la barra lateral."
 
 
 def crear_presentacion_ppt_y_google_slides(
@@ -570,8 +673,12 @@ def crear_presentacion_ppt_y_google_slides(
     Crea un PowerPoint (.pptx) y lo sube a Google Slides.
     diapositivas_texto: separa cada diapositiva con '---' y usa la primera línea de cada bloque como título.
     """
+    log_tool(f"📊 PPT/Slides: {titulo_presentacion}")
     prs = Presentation()
-    bloques = [b.strip() for b in diapositivas_texto.split("---") if b.strip()]
+    sep = "---" if "---" in diapositivas_texto else "\n\n"
+    bloques = [b.strip() for b in diapositivas_texto.split(sep) if b.strip()]
+    if not bloques:
+        bloques = [titulo_presentacion]
     for i, bloque in enumerate(bloques):
         lineas = [l.strip() for l in bloque.split("\n") if l.strip()]
         layout = prs.slide_layouts[0] if i == 0 else prs.slide_layouts[1]
@@ -592,7 +699,7 @@ def crear_presentacion_ppt_y_google_slides(
     )
 
     creds = get_user_credentials()
-    if creds:
+    if creds and check_scope(creds, "https://www.googleapis.com/auth/drive.file"):
         try:
             drive = build("drive", "v3", credentials=creds)
             media = MediaIoBaseUpload(
@@ -608,10 +715,10 @@ def crear_presentacion_ppt_y_google_slides(
                 .create(body=file_meta, media_body=media, fields="id,webViewLink")
                 .execute()
             )
-            return f"PowerPoint generado ({nombre_archivo}) y subido a Google Slides: {creado.get('webViewLink')}"
+            return f"ARCHIVO_OK: PowerPoint generado ({nombre_archivo}) y subido a Google Slides: {creado.get('webViewLink')}"
         except Exception as e:
-            return f"PowerPoint generado ({nombre_archivo}). Nota Drive: {e}"
-    return f"Presentación '{nombre_archivo}' lista para descargar en la barra lateral."
+            return f"ARCHIVO_OK: PowerPoint generado para descarga local ({nombre_archivo}). Nota Drive: {e}"
+    return f"ARCHIVO_OK: Presentación '{nombre_archivo}' lista para descargar en la barra lateral."
 
 
 def crear_excel_y_google_sheets(nombre_hoja: str, filas_csv: str) -> str:
@@ -619,12 +726,14 @@ def crear_excel_y_google_sheets(nombre_hoja: str, filas_csv: str) -> str:
     Crea un archivo Excel (.xlsx) y lo sube a Google Sheets.
     filas_csv: filas separadas por salto de línea y columnas separadas por '|'.
     """
+    log_tool(f"📈 Excel/Sheets: {nombre_hoja}")
     wb = Workbook()
     ws = wb.active
     ws.title = nombre_hoja[:30]
     for linea in filas_csv.strip().split("\n"):
         if linea.strip():
-            ws.append([celda.strip() for celda in linea.split("|")])
+            delim = "|" if "|" in linea else (";" if ";" in linea else ",")
+            ws.append([celda.strip() for celda in linea.split(delim)])
     buf = io.BytesIO()
     wb.save(buf)
     data_bytes = buf.getvalue()
@@ -638,7 +747,7 @@ def crear_excel_y_google_sheets(nombre_hoja: str, filas_csv: str) -> str:
     )
 
     creds = get_user_credentials()
-    if creds:
+    if creds and check_scope(creds, "https://www.googleapis.com/auth/drive.file"):
         try:
             drive = build("drive", "v3", credentials=creds)
             media = MediaIoBaseUpload(
@@ -654,10 +763,10 @@ def crear_excel_y_google_sheets(nombre_hoja: str, filas_csv: str) -> str:
                 .create(body=file_meta, media_body=media, fields="id,webViewLink")
                 .execute()
             )
-            return f"Excel generado ({nombre_archivo}) y subido a Google Sheets: {creado.get('webViewLink')}"
+            return f"ARCHIVO_OK: Excel generado ({nombre_archivo}) y subido a Google Sheets: {creado.get('webViewLink')}"
         except Exception as e:
-            return f"Excel generado ({nombre_archivo}). Nota Drive: {e}"
-    return f"Hoja de cálculo '{nombre_archivo}' lista para descargar en la barra lateral."
+            return f"ARCHIVO_OK: Excel generado para descarga local ({nombre_archivo}). Nota Drive: {e}"
+    return f"ARCHIVO_OK: Hoja de cálculo '{nombre_archivo}' lista para descargar en la barra lateral."
 
 
 TOOLS_LIST = [
@@ -690,7 +799,7 @@ if "code" in st.query_params and "google_creds" not in st.session_state:
             "token_uri": creds.token_uri,
             "client_id": creds.client_id,
             "client_secret": creds.client_secret,
-            "scopes": list(creds.scopes or SCOPES),
+            "scopes": list(creds.scopes or []),
         }
         oauth2 = build("oauth2", "v2", credentials=creds)
         user_info = oauth2.userinfo().get().execute()
@@ -713,6 +822,10 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
         st.write(
             "Conecta tu cuenta de Google para darle acceso aislado a tu **Gmail, Calendar, "
             "Docs, Slides, Sheets, YouTube, Tasks, Contactos, Forms y rutas de Maps**."
+        )
+        st.info(
+            "💡 **Importante:** En la pantalla de permisos de Google, marca **"
+            "Seleccionar todo** para habilitar el envío de correos, Calendar y Drive."
         )
         try:
             flow = get_oauth_flow()
@@ -738,13 +851,24 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
 
 
 # ==============================================================================
-# 5. INTERFAZ PRINCIPAL Y BARRA LATERAL
+# 5. INTERFAZ PRINCIPAL, VERIFICADOR DE PERMISOS Y BARRA LATERAL
 # ==============================================================================
+creds_actuales = get_user_credentials()
+permisos_faltantes = []
+if creds_actuales and creds_actuales.scopes:
+    granted_set = set(creds_actuales.scopes)
+    for sc, etiqueta in REQUIRED_WORKSPACE_SCOPES.items():
+        if sc not in granted_set:
+            permisos_faltantes.append(etiqueta)
+
 with st.sidebar:
     st.markdown("## 🎓 Agente IA ULima")
     if st.session_state.get("user_email"):
         st.success(f"🟢 {st.session_state['user_email']}")
-        st.caption("Conectado a Workspace, YouTube, Tasks, Forms y Maps")
+        if permisos_faltantes:
+            st.warning(f"⚠️ Permisos sin marcar: {', '.join(permisos_faltantes)}")
+        else:
+            st.caption("✅ Todos los permisos Workspace activos")
     else:
         st.info("⚡ Modo Rápido (Sin cuenta Google)")
 
@@ -795,6 +919,28 @@ with st.sidebar:
             st.session_state.pop(k, None)
         st.rerun()
 
+if permisos_faltantes:
+    st.warning(
+        f"⚠️ Esta cuenta inició sesión sin autorizar: **{', '.join(permisos_faltantes)}**. "
+        "Para que el agente pueda enviar correos o crear archivos en Drive/Calendar, "
+        "pulsa el botón de abajo y marca **Seleccionar todo** en Google."
+    )
+    try:
+        flow_reauth = get_oauth_flow()
+        reauth_url, _ = flow_reauth.authorization_url(
+            prompt="consent", access_type="offline"
+        )
+        col_re1, col_re2 = st.columns([1, 2])
+        with col_re1:
+            st.link_button(
+                "🔓 Activar permisos faltantes",
+                reauth_url,
+                type="primary",
+                use_container_width=True,
+            )
+    except Exception:
+        pass
+
 st.markdown("## ✨ ¿Qué quieres que haga hoy por ti?")
 st.write(
     "Pídeme lo que quieras en lenguaje natural: investigar en internet o YouTube, "
@@ -817,6 +963,8 @@ st.session_state.setdefault("messages", [])
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if msg.get("tools"):
+            st.caption("🛠️ Acciones ejecutadas: " + " | ".join(msg["tools"]))
 
 user_input = st.chat_input(
     "Escribe tu pedido aquí (ej. 'Busca videos de Cálculo, crea un resumen en Docs y agéndalo en Tasks')..."
@@ -830,7 +978,7 @@ if prompt_final:
 
     with st.chat_message("assistant"):
         with st.spinner("Ejecutando herramientas autónomas..."):
-            client = genai.Client(api_key=get_active_gemini_key())
+            st.session_state["tool_logs"] = []
             historial_gemini = [
                 types.Content(
                     role="model" if m["role"] == "assistant" else "user",
@@ -841,29 +989,40 @@ if prompt_final:
             texto_respuesta = None
             errores = []
 
-            for modelo in MODELOS_DISPONIBLES:
-                try:
-                    chat = client.chats.create(
-                        model=modelo,
-                        history=historial_gemini,
-                        config=types.GenerateContentConfig(
-                            system_instruction=get_system_instruction(),
-                            tools=TOOLS_LIST,
-                            temperature=0.4,
-                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                maximum_remote_calls=6
-                            ),
-                        ),
-                    )
-                    response = chat.send_message(prompt_final)
-                    texto_respuesta = response.text or "Acción completada."
+            for api_key in get_gemini_keys():
+                if texto_respuesta:
                     break
-                except Exception as e:
-                    err_str = str(e)
-                    errores.append(f"{modelo}: {err_str}")
-                    if "429" in err_str or "404" in err_str:
-                        continue
-                    break
+                client = genai.Client(api_key=api_key)
+                for modelo in MODELOS_DISPONIBLES:
+                    for intento in range(2):
+                        try:
+                            st.session_state["tool_logs"] = []
+                            chat = client.chats.create(
+                                model=modelo,
+                                history=historial_gemini,
+                                config=types.GenerateContentConfig(
+                                    system_instruction=get_system_instruction(),
+                                    tools=TOOLS_LIST,
+                                    temperature=0.3,
+                                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                        maximum_remote_calls=6
+                                    ),
+                                ),
+                            )
+                            response = chat.send_message(prompt_final)
+                            texto_respuesta = response.text or "Acción completada."
+                            break
+                        except Exception as e:
+                            err_str = str(e)
+                            if (
+                                "503" in err_str or "UNAVAILABLE" in err_str
+                            ) and intento == 0:
+                                time.sleep(1.5)
+                                continue
+                            errores.append(f"{modelo}: {err_str}")
+                            break
+                    if texto_respuesta:
+                        break
 
             if not texto_respuesta:
                 texto_respuesta = (
@@ -871,8 +1030,18 @@ if prompt_final:
                     + "\n- ".join(errores)
                 )
 
+            herramientas_usadas = list(
+                dict.fromkeys(st.session_state.get("tool_logs", []))
+            )
             st.markdown(texto_respuesta)
+            if herramientas_usadas:
+                st.caption("🛠️ Acciones ejecutadas: " + " | ".join(herramientas_usadas))
+
             st.session_state["messages"].append(
-                {"role": "assistant", "content": texto_respuesta}
+                {
+                    "role": "assistant",
+                    "content": texto_respuesta,
+                    "tools": herramientas_usadas,
+                }
             )
             st.rerun()
