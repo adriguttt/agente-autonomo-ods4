@@ -50,9 +50,13 @@ SCOPES = [
 
 MODELOS_DISPONIBLES = [
     "gemini-3.8-flash",
-    "gemini-3.8-flash-lite",
-    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
 ]
+
+
+def get_active_gemini_key() -> str:
+    clave_manual = st.session_state.get("custom_gemini_key", "").strip()
+    return clave_manual if clave_manual else st.secrets["GEMINI_API_KEY"]
 
 
 def get_system_instruction() -> str:
@@ -153,7 +157,11 @@ def buscar_internet(consulta: str) -> str:
                 items.append(
                     f"- {titulo.get_text(strip=True)}: {snippet.get_text(strip=True) if snippet else ''} (URL: {titulo.get('href', '')})"
                 )
-        return "\n".join(items) if items else "Sin resultados web adicionales; responde con tu conocimiento actualizado."
+        return (
+            "\n".join(items)
+            if items
+            else "Sin resultados web adicionales; responde con tu conocimiento actualizado."
+        )
     except Exception:
         return "Búsqueda web no disponible temporalmente; responde con tu conocimiento académico actualizado."
 
@@ -176,7 +184,7 @@ def buscar_videos_youtube(tema: str, max_resultados: int = 5) -> str:
     """Busca videos educativos, tutoriales o conferencias en YouTube sobre un tema académico."""
     limite = min(max_resultados, 8)
     try:
-        yt = build("youtube", "v3", developerKey=st.secrets["GEMINI_API_KEY"])
+        yt = build("youtube", "v3", developerKey=get_active_gemini_key())
         res = (
             yt.search()
             .list(
@@ -771,6 +779,13 @@ with st.sidebar:
             )
 
     st.divider()
+    with st.expander("🔑 API Key de respaldo (opcional)"):
+        st.text_input(
+            "Pega otra GEMINI_API_KEY si cambias de cuenta:",
+            type="password",
+            key="custom_gemini_key",
+        )
+
     if st.button("🗑️ Limpiar conversación", use_container_width=True):
         st.session_state["messages"] = []
         st.rerun()
@@ -815,7 +830,7 @@ if prompt_final:
 
     with st.chat_message("assistant"):
         with st.spinner("Ejecutando herramientas autónomas..."):
-            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+            client = genai.Client(api_key=get_active_gemini_key())
             historial_gemini = [
                 types.Content(
                     role="model" if m["role"] == "assistant" else "user",
@@ -824,7 +839,7 @@ if prompt_final:
                 for m in st.session_state["messages"][:-1]
             ]
             texto_respuesta = None
-            ultimo_error = None
+            errores = []
 
             for modelo in MODELOS_DISPONIBLES:
                 try:
@@ -844,20 +859,17 @@ if prompt_final:
                     texto_respuesta = response.text or "Acción completada."
                     break
                 except Exception as e:
-                    ultimo_error = str(e)
-                    if "429" in ultimo_error or "404" in ultimo_error:
+                    err_str = str(e)
+                    errores.append(f"{modelo}: {err_str}")
+                    if "429" in err_str or "404" in err_str:
                         continue
                     break
 
             if not texto_respuesta:
-                if ultimo_error and "429" in ultimo_error:
-                    texto_respuesta = (
-                        "⚠️ Se alcanzó el límite diario gratuito de peticiones de esta API Key. "
-                        "Genera una clave nueva en aistudio.google.com/apikey (en un proyecto nuevo) "
-                        "y actualiza `GEMINI_API_KEY` en Streamlit Secrets."
-                    )
-                else:
-                    texto_respuesta = f"Ocurrió un error al procesar la solicitud: {ultimo_error}"
+                texto_respuesta = (
+                    "⚠️ No se pudo completar con los modelos disponibles:\n- "
+                    + "\n- ".join(errores)
+                )
 
             st.markdown(texto_respuesta)
             st.session_state["messages"].append(
