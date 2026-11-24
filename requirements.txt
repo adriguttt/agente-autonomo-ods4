@@ -1,8 +1,9 @@
 streamlit
-crewai[google-genai]
 google-genai
 duckduckgo-search
-litellm
 python-docx
 openpyxl
 python-pptx
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
