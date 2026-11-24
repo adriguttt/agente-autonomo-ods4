@@ -79,11 +79,19 @@ def get_oauth_flow() -> Flow:
             "redirect_uris": [st.secrets["REDIRECT_URI"]],
         }
     }
-    return Flow.from_client_config(
-        client_config=client_config,
-        scopes=SCOPES,
-        redirect_uri=st.secrets["REDIRECT_URI"],
-    )
+    try:
+        return Flow.from_client_config(
+            client_config=client_config,
+            scopes=SCOPES,
+            redirect_uri=st.secrets["REDIRECT_URI"],
+            autogenerate_code_verifier=False,
+        )
+    except TypeError:
+        return Flow.from_client_config(
+            client_config=client_config,
+            scopes=SCOPES,
+            redirect_uri=st.secrets["REDIRECT_URI"],
+        )
 
 
 def get_user_credentials() -> Credentials | None:
