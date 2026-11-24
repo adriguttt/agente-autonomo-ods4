@@ -1,3 +1,7 @@
+import os
+
+os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+
 import io
 import base64
 import datetime
@@ -98,7 +102,7 @@ def get_user_credentials() -> Credentials | None:
     creds_dict = st.session_state.get("google_creds")
     if not creds_dict:
         return None
-    return Credentials.from_authorized_user_info(creds_dict, SCOPES)
+    return Credentials.from_authorized_user_info(creds_dict)
 
 
 # ==============================================================================
@@ -671,7 +675,7 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
         try:
             flow = get_oauth_flow()
             auth_url, _ = flow.authorization_url(
-                prompt="consent", access_type="offline", include_granted_scopes="true"
+                prompt="consent", access_type="offline"
             )
             st.link_button(
                 "🔵 Continuar con Google",
