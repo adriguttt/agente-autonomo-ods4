@@ -15,11 +15,17 @@ from email.message import EmailMessage
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
 from docx import Document
 from pptx import Presentation
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
+from pypdf import PdfReader
+from PIL import Image
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from google import genai
 from google.genai import types
@@ -45,6 +51,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/contacts.readonly",
@@ -54,7 +61,8 @@ SCOPES = [
 REQUIRED_WORKSPACE_SCOPES = {
     "https://www.googleapis.com/auth/gmail.modify": "Gmail",
     "https://www.googleapis.com/auth/calendar": "Calendar",
-    "https://www.googleapis.com/auth/drive.file": "Drive (Docs/Slides/Sheets)",
+    "https://www.googleapis.com/auth/drive.file": "Drive (Crear/Subir)",
+    "https://www.googleapis.com/auth/drive.readonly": "Drive (Leer archivos)",
     "https://www.googleapis.com/auth/tasks": "Tasks",
     "https://www.googleapis.com/auth/contacts.readonly": "Contactos",
     "https://www.googleapis.com/auth/forms.body": "Forms",
@@ -83,15 +91,24 @@ def log_tool(nombre: str) -> None:
     st.session_state.setdefault("tool_logs", []).append(nombre)
 
 
+def registrar_archivo_generado(nombre: str, data_bytes: bytes, mime: str = "application/octet-stream") -> None:
+    item = {"nombre": nombre, "bytes": data_bytes, "mime": mime}
+    st.session_state["ultimo_archivo"] = item
+    st.session_state.setdefault("archivos_generados", []).append(item)
+
+
 def get_system_instruction() -> str:
     ahora_lima = datetime.datetime.now(ZoneInfo("America/Lima")).strftime(
         "%Y-%m-%d %H:%M (%A)"
     )
     usuario = st.session_state.get("user_email", "Modo Rápido (sin cuenta Google)")
+    adjuntos = st.session_state.get("archivos_subidos_info", [])
+    resumen_adj = ", ".join(adjuntos) if adjuntos else "Ninguno"
     return f"""
 Eres el Agente IA Autónomo de la Universidad de Lima enfocado en el ODS 4 (Educación de Calidad).
-Ayudas a estudiantes, docentes y postulantes a investigar, estudiar, gestionar su tiempo y automatizar tareas reales.
+Ayudas a estudiantes, docentes y postulantes a investigar, estudiar, analizar documentos/imágenes, construir aplicaciones interactivas (Canvas) y automatizar tareas reales.
 Usuario conectado actualmente: {usuario}.
+Archivos/imágenes adjuntados por el usuario en sesión: {resumen_adj}.
 
 Conocimiento base ULima (14 carreras de pregrado):
 1. Administración
@@ -111,9 +128,12 @@ Conocimiento base ULima (14 carreras de pregrado):
 
 Reglas estrictas de ejecución:
 - Ejecuta las herramientas disponibles de forma autónoma y encadenada cuando el usuario pida varias acciones en un mismo mensaje.
-- JAMÁS afirmes que enviaste un correo, creaste un archivo, agendaste un evento o creaste una tarea/encuesta si la herramienta no devolvió una confirmación explícita ('ENVIADO_OK', 'ARCHIVO_OK', 'EVENTO_OK', 'TAREA_OK', 'FORM_OK') o si devolvió 'ERROR:'. Si hay un error, explica el motivo exacto al usuario.
-- Para enviar correos usa gestionar_gmail con accion='enviar' y un correo electrónico válido en destinatario. Si solo te dan un nombre (ej. "Carlos"), consulta primero buscar_contactos_google.
-- Si el usuario pide crear un documento, presentación o Excel y enviarlo por Gmail, genera primero el archivo y luego llama a gestionar_gmail con adjuntar_ultimo_archivo=True.
+- JAMÁS afirmes que enviaste un correo, creaste un archivo, agendaste un evento o creaste una tarea/encuesta/canvas si la herramienta no devolvió una confirmación explícita ('ENVIADO_OK', 'ARCHIVO_OK', 'EVENTO_OK', 'TAREA_OK', 'FORM_OK', 'CANVAS_OK', 'IMAGEN_OK') o si devolvió 'ERROR:'. Si hay un error, explica el motivo exacto al usuario.
+- Cuando el usuario pida crear una app interactiva, simulador, calculadora, mapa mental visual, diagrama o página web (Canvas), llama a `crear_canvas_interactivo` entregando código HTML5 + CSS + JS autocontenido y funcional.
+- Cuando el usuario pida generar una imagen, gráfico de barras/líneas/pastel o esquema visual descargable, usa `generar_imagen_o_grafico`.
+- Cuando el usuario pida buscar o leer archivos de su Google Drive, usa `gestionar_google_drive`.
+- Para enviar correos usa `gestionar_gmail` con accion='enviar' y un correo electrónico válido en destinatario. Si solo te dan un nombre, consulta primero `buscar_contactos_google`.
+- Si el usuario pide crear un documento, presentación, Excel, imagen o Canvas y enviarlo por Gmail, genéralo primero y luego llama a `gestionar_gmail` con adjuntar_ultimo_archivo=True.
 - Responde siempre en español claro, estructurado y con enlaces directos a los recursos creados.
 - Fecha y hora actual en Lima, Perú: {ahora_lima}
 """
@@ -163,16 +183,48 @@ def format_google_error(servicio: str, err: Exception) -> str:
         status = getattr(err.resp, "status", "?")
         if status == 403:
             return (
-                f"ERROR: Permiso denegado en {servicio} (403). Verifica que marcaste todas las casillas "
-                f"al iniciar sesión con Google y que la API de {servicio} esté habilitada en Google Cloud."
+                f"ERROR: Permiso denegado en {servicio} (403). Cierra sesión, vuelve a entrar "
+                f"marcando todas las casillas de permisos y verifica que la API de {servicio} esté activa."
             )
         if status == 401:
             return "ERROR: La sesión de Google expiró (401). Cierra sesión y vuelve a entrar."
     return f"ERROR en {servicio}: {err}"
 
 
+def extraer_texto_archivo(nombre: str, data_bytes: bytes) -> str:
+    ext = nombre.lower().split(".")[-1]
+    try:
+        if ext == "pdf":
+            reader = PdfReader(io.BytesIO(data_bytes))
+            paginas = [p.extract_text() or "" for p in reader.pages[:25]]
+            return "\n".join(paginas).strip()[:12000]
+        if ext == "docx":
+            doc = Document(io.BytesIO(data_bytes))
+            return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])[:12000]
+        if ext == "xlsx":
+            wb = load_workbook(io.BytesIO(data_bytes), data_only=True)
+            salida = []
+            for sheet in wb.sheetnames[:5]:
+                ws = wb[sheet]
+                salida.append(f"--- Hoja: {sheet} ---")
+                for row in list(ws.iter_rows(values_only=True))[:60]:
+                    if any(row):
+                        salida.append(" | ".join([str(c) if c is not None else "" for c in row]))
+            return "\n".join(salida)[:12000]
+        if ext == "pptx":
+            prs = Presentation(io.BytesIO(data_bytes))
+            salida = []
+            for i, slide in enumerate(prs.slides[:30]):
+                textos = [sh.text.strip() for sh in slide.shapes if hasattr(sh, "text") and sh.text.strip()]
+                salida.append(f"[Diapositiva {i+1}]: " + " / ".join(textos))
+            return "\n".join(salida)[:12000]
+        return data_bytes.decode("utf-8", errors="ignore")[:12000]
+    except Exception as e:
+        return f"(No se pudo extraer texto de {nombre}: {e})"
+
+
 # ==============================================================================
-# 2. HERRAMIENTAS AUTÓNOMAS DEL AGENTE (AISLADAS POR SESIÓN)
+# 2. HERRAMIENTAS AUTÓNOMAS DEL AGENTE (15 HERRAMIENTAS)
 # ==============================================================================
 def buscar_internet(consulta: str) -> str:
     """Busca información actualizada en internet y devuelve títulos, enlaces y resúmenes."""
@@ -270,6 +322,161 @@ def buscar_videos_youtube(tema: str, max_resultados: int = 5) -> str:
 
     query_yt = quote_plus(tema)
     return f"Búsqueda directa de videos educativos en YouTube sobre **{tema}**: https://www.youtube.com/results?search_query={query_yt}"
+
+
+def gestionar_google_drive(accion: str, consulta_o_id: str = "") -> str:
+    """
+    Busca archivos en el Google Drive del usuario o lee el contenido de un archivo por su ID.
+    accion: 'buscar' (lista archivos que coincidan con consulta_o_id) o 'leer' (lee el texto del archivo cuyo file_id es consulta_o_id).
+    """
+    log_tool(f"📁 Drive ({accion}: {consulta_o_id[:25]})")
+    creds = get_user_credentials()
+    if not creds:
+        return "ERROR: Modo Rápido activo. Conecta tu cuenta de Google para acceder a Google Drive."
+    if not (
+        check_scope(creds, "https://www.googleapis.com/auth/drive.readonly")
+        or check_scope(creds, "https://www.googleapis.com/auth/drive.file")
+    ):
+        return "ERROR: Falta el permiso de lectura de Google Drive. Pulsa 'Activar permisos faltantes' arriba."
+    try:
+        drive = build("drive", "v3", credentials=creds)
+        if accion.lower().strip() in ["leer", "read", "abrir", "open"] and consulta_o_id:
+            fid = consulta_o_id.strip()
+            meta = drive.files().get(fileId=fid, fields="id,name,mimeType").execute()
+            mime = meta.get("mimeType", "")
+            nombre = meta.get("name", "archivo")
+            if mime == "application/vnd.google-apps.document":
+                contenido = drive.files().export(fileId=fid, mimeType="text/plain").execute()
+                return f"Contenido de Google Doc '{nombre}':\n{contenido.decode('utf-8', errors='ignore')[:10000]}"
+            if mime == "application/vnd.google-apps.spreadsheet":
+                contenido = drive.files().export(fileId=fid, mimeType="text/csv").execute()
+                return f"Contenido de Google Sheet '{nombre}':\n{contenido.decode('utf-8', errors='ignore')[:10000]}"
+            if mime == "application/vnd.google-apps.presentation":
+                contenido = drive.files().export(fileId=fid, mimeType="text/plain").execute()
+                return f"Contenido de Google Slides '{nombre}':\n{contenido.decode('utf-8', errors='ignore')[:10000]}"
+            raw_bytes = drive.files().get_media(fileId=fid).execute()
+            texto = extraer_texto_archivo(nombre, raw_bytes)
+            return f"Contenido de '{nombre}':\n{texto[:10000]}"
+
+        q = "trashed = false"
+        if consulta_o_id.strip():
+            termino = consulta_o_id.strip().replace("'", "\\'")
+            q += f" and name contains '{termino}'"
+        res = (
+            drive.files()
+            .list(
+                q=q,
+                pageSize=12,
+                orderBy="modifiedTime desc",
+                fields="files(id, name, mimeType, webViewLink, modifiedTime)",
+            )
+            .execute()
+        )
+        archivos = res.get("files", [])
+        if not archivos:
+            return f"No se encontraron archivos en Google Drive con '{consulta_o_id}'."
+        return "\n".join(
+            [
+                f"- **{f['name']}** | ID: `{f['id']}` | Tipo: {f['mimeType'].split('.')[-1]} | Enlace: {f.get('webViewLink', '')}"
+                for f in archivos
+            ]
+        )
+    except Exception as e:
+        return format_google_error("Google Drive", e)
+
+
+def crear_canvas_interactivo(titulo: str, codigo_html_completo: str) -> str:
+    """
+    Crea y renderiza en pantalla un Canvas interactivo (aplicación web, simulador, calculadora,
+    diagrama visual o dashboard) en HTML5/CSS/JS autocontenido y lo guarda como archivo descargable.
+    """
+    log_tool(f"🎨 Canvas: {titulo}")
+    html_limpio = codigo_html_completo.strip()
+    if "<html" not in html_limpio.lower():
+        html_limpio = f"""<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{titulo}</title></head>
+<body style="font-family: system-ui, sans-serif; margin: 0; padding: 16px;">
+{html_limpio}
+</body></html>"""
+
+    nombre_archivo = f"Canvas_{titulo[:35].strip().replace(' ', '_')}.html"
+    data_bytes = html_limpio.encode("utf-8")
+    registrar_archivo_generado(nombre_archivo, data_bytes, "text/html")
+    st.session_state["canvas_activo"] = {
+        "titulo": titulo,
+        "html": html_limpio,
+        "nombre_archivo": nombre_archivo,
+    }
+    return (
+        f"CANVAS_OK: Canvas interactivo '{titulo}' renderizado en pantalla y guardado como '{nombre_archivo}' "
+        "para descarga o envío por Gmail."
+    )
+
+
+def generar_imagen_o_grafico(
+    titulo: str,
+    tipo: str,
+    etiquetas_separadas_por_coma: str,
+    valores_separados_por_coma: str,
+    subtitulo_o_nota: str = "",
+) -> str:
+    """
+    Genera una imagen PNG de alta calidad (gráfico estadístico de barras, líneas, pastel o tarjeta visual académica)
+    descargable y adjuntable por correo.
+    tipo: 'barras', 'lineas', 'pastel' o 'tarjeta'.
+    """
+    log_tool(f"🖼️ Imagen/Gráfico: {titulo}")
+    try:
+        fig, ax = plt.subplots(figsize=(8, 4.5), dpi=160)
+        fig.patch.set_facecolor("#FFFFFF")
+        t_clean = tipo.lower().strip()
+
+        if t_clean in ["barras", "lineas", "pastel"] and etiquetas_separadas_por_coma and valores_separados_por_coma:
+            etiquetas = [e.strip() for e in etiquetas_separadas_por_coma.split(",") if e.strip()]
+            valores = []
+            for v in valores_separados_por_coma.split(","):
+                v_num = re.sub(r"[^\d.\-]", "", v.strip())
+                if v_num:
+                    valores.append(float(v_num))
+            n = min(len(etiquetas), len(valores))
+            etiquetas, valores = etiquetas[:n], valores[:n]
+            colores = ["#FF6B00", "#1E293B", "#0EA5E9", "#10B981", "#8B5CF6", "#F59E0B"]
+
+            if t_clean == "pastel":
+                ax.pie(valores, labels=etiquetas, autopct="%1.1f%%", colors=colores[:n], startangle=140)
+            elif t_clean == "lineas":
+                ax.plot(etiquetas, valores, marker="o", linewidth=2.5, color="#FF6B00")
+                ax.grid(True, linestyle="--", alpha=0.4)
+                plt.xticks(rotation=20, ha="right")
+            else:
+                bars = ax.bar(etiquetas, valores, color=colores[:n])
+                ax.bar_label(bars, padding=3, fontsize=9)
+                ax.grid(axis="y", linestyle="--", alpha=0.4)
+                plt.xticks(rotation=20, ha="right")
+            ax.set_title(titulo, fontsize=13, fontweight="bold", pad=12, color="#0F172A")
+            if subtitulo_o_nota:
+                fig.text(0.5, 0.01, subtitulo_o_nota, ha="center", fontsize=8.5, color="#475569")
+        else:
+            ax.axis("off")
+            fig.patch.set_facecolor("#0F172A")
+            ax.text(0.5, 0.72, "UNIVERSIDAD DE LIMA — ODS 4", ha="center", va="center", fontsize=10, color="#FF8C38", fontweight="bold")
+            ax.text(0.5, 0.50, titulo, ha="center", va="center", fontsize=15, color="#FFFFFF", fontweight="bold", wrap=True)
+            ax.text(0.5, 0.25, subtitulo_o_nota or etiquetas_separadas_por_coma, ha="center", va="center", fontsize=10.5, color="#CBD5E1", wrap=True)
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        img_bytes = buf.getvalue()
+
+        nombre_archivo = f"Imagen_{titulo[:35].strip().replace(' ', '_')}.png"
+        registrar_archivo_generado(nombre_archivo, img_bytes, "image/png")
+        st.session_state["ultima_imagen"] = {"titulo": titulo, "bytes": img_bytes, "nombre": nombre_archivo}
+        return f"IMAGEN_OK: Imagen '{nombre_archivo}' generada, mostrada en pantalla y lista para descargar o enviar por Gmail."
+    except Exception as e:
+        return f"ERROR al generar imagen: {e}"
 
 
 def gestionar_google_tasks(
@@ -538,7 +745,7 @@ def gestionar_gmail(
     adjuntar_ultimo_archivo: bool = False,
 ) -> str:
     """
-    Lee los últimos correos o envía un correo por Gmail (con opción de adjuntar el último archivo creado).
+    Lee los últimos correos o envía un correo por Gmail (con opción de adjuntar el último archivo creado o subido).
     accion: 'enviar' para mandar un correo, o 'leer' para revisar la bandeja.
     destinatario: dirección de correo electrónico válida (ej. 'usuario@gmail.com').
     """
@@ -549,7 +756,7 @@ def gestionar_gmail(
     if not check_scope(creds, "https://www.googleapis.com/auth/gmail.modify"):
         return (
             "ERROR: Esta cuenta de Google no tiene activo el permiso de Gmail. "
-            "Cierra sesión en la barra lateral, vuelve a entrar con Google y marca todas las casillas de permisos."
+            "Pulsa 'Activar permisos faltantes' arriba y marca todas las casillas."
         )
 
     try:
@@ -635,12 +842,10 @@ def crear_documento_word_y_google_doc(titulo: str, contenido: str) -> str:
     doc.save(buf)
     data_bytes = buf.getvalue()
     nombre_archivo = f"{titulo[:40].strip().replace(' ', '_')}.docx"
-    st.session_state["ultimo_archivo"] = {
-        "nombre": nombre_archivo,
-        "bytes": data_bytes,
-    }
-    st.session_state.setdefault("archivos_generados", []).append(
-        st.session_state["ultimo_archivo"]
+    registrar_archivo_generado(
+        nombre_archivo,
+        data_bytes,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
     creds = get_user_credentials()
@@ -690,12 +895,10 @@ def crear_presentacion_ppt_y_google_slides(
     prs.save(buf)
     data_bytes = buf.getvalue()
     nombre_archivo = f"{titulo_presentacion[:40].strip().replace(' ', '_')}.pptx"
-    st.session_state["ultimo_archivo"] = {
-        "nombre": nombre_archivo,
-        "bytes": data_bytes,
-    }
-    st.session_state.setdefault("archivos_generados", []).append(
-        st.session_state["ultimo_archivo"]
+    registrar_archivo_generado(
+        nombre_archivo,
+        data_bytes,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     )
 
     creds = get_user_credentials()
@@ -738,12 +941,10 @@ def crear_excel_y_google_sheets(nombre_hoja: str, filas_csv: str) -> str:
     wb.save(buf)
     data_bytes = buf.getvalue()
     nombre_archivo = f"{nombre_hoja[:40].strip().replace(' ', '_')}.xlsx"
-    st.session_state["ultimo_archivo"] = {
-        "nombre": nombre_archivo,
-        "bytes": data_bytes,
-    }
-    st.session_state.setdefault("archivos_generados", []).append(
-        st.session_state["ultimo_archivo"]
+    registrar_archivo_generado(
+        nombre_archivo,
+        data_bytes,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
     creds = get_user_credentials()
@@ -773,6 +974,9 @@ TOOLS_LIST = [
     buscar_internet,
     leer_pagina_web,
     buscar_videos_youtube,
+    gestionar_google_drive,
+    crear_canvas_interactivo,
+    generar_imagen_o_grafico,
     gestionar_google_tasks,
     buscar_contactos_google,
     crear_formulario_google,
@@ -821,11 +1025,11 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
         st.markdown("## 🎓 Agente IA — Universidad de Lima")
         st.write(
             "Conecta tu cuenta de Google para darle acceso aislado a tu **Gmail, Calendar, "
-            "Docs, Slides, Sheets, YouTube, Tasks, Contactos, Forms y rutas de Maps**."
+            "Google Drive, Docs, Slides, Sheets, YouTube, Tasks, Contactos, Forms, Maps y Canvas**."
         )
         st.info(
             "💡 **Importante:** En la pantalla de permisos de Google, marca **"
-            "Seleccionar todo** para habilitar el envío de correos, Calendar y Drive."
+            "Seleccionar todo** para habilitar Gmail, Calendar y Google Drive."
         )
         try:
             flow = get_oauth_flow()
@@ -842,7 +1046,7 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
             st.error(f"Revisa tus Secrets de OAuth en Streamlit: {e}")
 
         if st.button(
-            "⚡ Entrar ahora en Modo Rápido (Web + Word + PPT + Excel + YouTube + Maps)",
+            "⚡ Entrar ahora en Modo Rápido (Canvas + Adjuntos + Web + Office + YouTube)",
             use_container_width=True,
         ):
             st.session_state["modo_rapido"] = True
@@ -851,7 +1055,7 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
 
 
 # ==============================================================================
-# 5. INTERFAZ PRINCIPAL, VERIFICADOR DE PERMISOS Y BARRA LATERAL
+# 5. INTERFAZ PRINCIPAL, ADJUNTOS, VERIFICADOR DE PERMISOS Y BARRA LATERAL
 # ==============================================================================
 creds_actuales = get_user_credentials()
 permisos_faltantes = []
@@ -873,31 +1077,67 @@ with st.sidebar:
         st.info("⚡ Modo Rápido (Sin cuenta Google)")
 
     st.divider()
-    st.markdown("**Herramientas del Agente:**")
+    st.markdown("**📎 Adjuntar archivos o imágenes:**")
+    archivos_subidos = st.file_uploader(
+        "Sube PDF, Word, Excel, PPT, TXT o imágenes (PNG/JPG):",
+        type=["pdf", "docx", "xlsx", "pptx", "txt", "csv", "png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="uploader_sidebar",
+    )
+
+    contexto_documentos_subidos = []
+    imagenes_subidas_parts = []
+    nombres_subidos = []
+
+    if archivos_subidos:
+        for f in archivos_subidos:
+            f_bytes = f.getvalue()
+            nombres_subidos.append(f.name)
+            if f.type and f.type.startswith("image/"):
+                imagenes_subidas_parts.append(
+                    types.Part.from_bytes(data=f_bytes, mime_type=f.type)
+                )
+                st.image(f_bytes, caption=f.name, use_container_width=True)
+            else:
+                texto_doc = extraer_texto_archivo(f.name, f_bytes)
+                contexto_documentos_subidos.append(
+                    f"=== CONTENIDO DEL ARCHIVO ADJUNTO '{f.name}' ===\n{texto_doc}"
+                )
+        # Guarda el último archivo subido como disponible para reenviar por Gmail
+        ultimo_subido = archivos_subidos[-1]
+        st.session_state["ultimo_archivo"] = {
+            "nombre": ultimo_subido.name,
+            "bytes": ultimo_subido.getvalue(),
+            "mime": ultimo_subido.type or "application/octet-stream",
+        }
+    st.session_state["archivos_subidos_info"] = nombres_subidos
+
+    st.divider()
+    st.markdown("**Herramientas del Agente (15):**")
     st.markdown(
         """
+- 🎨 Canvas Interactivo (Apps/Web/Diagramas)
+- 🖼️ Generador de Imágenes y Gráficos
+- 📎 Análisis de PDF, Office e Imágenes
+- 📁 Google Drive (Buscar y Leer archivos)
 - 🌐 Navegador Web & Lectura URL
-- ▶️ YouTube Educativo (Búsqueda)
-- ✅ Google Tasks (Pendientes)
-- 👥 Google Contactos
-- 📝 Google Forms (Encuestas/Quiz)
-- 🗺️ Google Maps (Rutas y Distancias)
-- 📅 Google Calendar (Leer y Agendar)
-- 📧 Gmail (Leer y Enviar con adjuntos)
-- 📄 Word + Google Docs
-- 📊 PowerPoint + Google Slides
-- 📈 Excel + Google Sheets
+- ▶️ YouTube Educativo
+- ✅ Google Tasks & 📅 Calendar
+- 📧 Gmail (Enviar con adjuntos) & 👥 Contactos
+- 📝 Google Forms & 🗺️ Google Maps
+- 📄 Word/Docs | 📊 PPT/Slides | 📈 Excel/Sheets
 """
     )
 
     if st.session_state.get("archivos_generados"):
         st.divider()
-        st.markdown("**📥 Archivos descargables:**")
+        st.markdown("**📥 Archivos creados por el agente:**")
         for idx, arch in enumerate(st.session_state["archivos_generados"]):
             st.download_button(
                 label=f"Descargar {arch['nombre']}",
                 data=arch["bytes"],
                 file_name=arch["nombre"],
+                mime=arch.get("mime", "application/octet-stream"),
                 key=f"dl_{idx}_{arch['nombre']}",
                 use_container_width=True,
             )
@@ -910,27 +1150,28 @@ with st.sidebar:
             key="custom_gemini_key",
         )
 
-    if st.button("🗑️ Limpiar conversación", use_container_width=True):
+    if st.button("🗑️ Limpiar conversación y Canvas", use_container_width=True):
         st.session_state["messages"] = []
+        st.session_state.pop("canvas_activo", None)
+        st.session_state.pop("ultima_imagen", None)
         st.rerun()
 
     if st.button("🚪 Cerrar sesión", use_container_width=True):
-        for k in ["google_creds", "user_email", "modo_rapido", "messages"]:
+        for k in ["google_creds", "user_email", "modo_rapido", "messages", "canvas_activo", "ultima_imagen"]:
             st.session_state.pop(k, None)
         st.rerun()
 
 if permisos_faltantes:
     st.warning(
         f"⚠️ Esta cuenta inició sesión sin autorizar: **{', '.join(permisos_faltantes)}**. "
-        "Para que el agente pueda enviar correos o crear archivos en Drive/Calendar, "
-        "pulsa el botón de abajo y marca **Seleccionar todo** en Google."
+        "Pulsa el botón de abajo y marca **Seleccionar todo** en Google para activar Google Drive y Gmail."
     )
     try:
         flow_reauth = get_oauth_flow()
         reauth_url, _ = flow_reauth.authorization_url(
             prompt="consent", access_type="offline"
         )
-        col_re1, col_re2 = st.columns([1, 2])
+        col_re1, _ = st.columns([1, 2])
         with col_re1:
             st.link_button(
                 "🔓 Activar permisos faltantes",
@@ -943,21 +1184,46 @@ if permisos_faltantes:
 
 st.markdown("## ✨ ¿Qué quieres que haga hoy por ti?")
 st.write(
-    "Pídeme lo que quieras en lenguaje natural: investigar en internet o YouTube, "
-    "orientarte entre las 14 carreras de la ULima, crear tareas, encuestas en Forms, "
-    "calcular rutas en Maps, revisar/agendar Calendar, enviar Gmails o crear Docs, PPT y Excel."
+    "Adjunta documentos o imágenes en la barra lateral, pídeme que revise tu **Google Drive**, "
+    "cree un **Canvas interactivo**, genere **gráficos/imágenes**, agende en **Calendar** o envíe **Gmails**."
 )
 
 c1, c2, c3, c4 = st.columns(4)
 prompt_rapido = None
-if c1.button("🧭 Orientación 14 Carreras ULima", use_container_width=True):
+if c1.button("🎨 Crear Canvas Simulador ULima", use_container_width=True):
+    prompt_rapido = "Crea un Canvas interactivo con una calculadora de promedio ponderado y simulador de notas para estudiantes de la Universidad de Lima."
+if c2.button("📁 Revisar mi Google Drive", use_container_width=True):
+    prompt_rapido = "Busca mis últimos archivos en Google Drive y muéstrame su lista con enlaces."
+if c3.button("🖼️ Generar Gráfico ODS 4", use_container_width=True):
+    prompt_rapido = "Genera una imagen con un gráfico de barras sobre el impacto de la IA en la educación superior (Comprensión 85, Productividad 92, Investigación 88, Redacción 79)."
+if c4.button("🧭 Orientación 14 Carreras ULima", use_container_width=True):
     prompt_rapido = "Ayúdame a comparar las 14 carreras de la Universidad de Lima según mis intereses."
-if c2.button("▶️ Videos + Tareas en Tasks", use_container_width=True):
-    prompt_rapido = "Busca 3 videos educativos en YouTube sobre Inteligencia Artificial en educación y créame una tarea en Google Tasks para estudiarlos esta semana."
-if c3.button("📝 Crear Encuesta Google Forms", use_container_width=True):
-    prompt_rapido = "Crea un Google Form titulado 'Encuesta de Hábitos de Estudio ULima' con 4 preguntas clave."
-if c4.button("🗺️ Ruta a ULima en Maps", use_container_width=True):
-    prompt_rapido = "Calcula la ruta y tiempo de viaje desde Miraflores, Lima hasta Universidad de Lima, Surco en Google Maps."
+
+# Renderizado persistente del Canvas activo si existe
+if st.session_state.get("canvas_activo"):
+    canvas = st.session_state["canvas_activo"]
+    with st.expander(f"🎨 Canvas Interactivo: {canvas['titulo']}", expanded=True):
+        components.html(canvas["html"], height=520, scrolling=True)
+        st.download_button(
+            label=f"⬇️ Descargar {canvas['nombre_archivo']}",
+            data=canvas["html"].encode("utf-8"),
+            file_name=canvas["nombre_archivo"],
+            mime="text/html",
+            key="dl_canvas_main",
+        )
+
+# Renderizado persistente de la última imagen generada si existe
+if st.session_state.get("ultima_imagen"):
+    img_data = st.session_state["ultima_imagen"]
+    with st.expander(f"🖼️ Imagen Generada: {img_data['titulo']}", expanded=True):
+        st.image(img_data["bytes"], caption=img_data["titulo"], use_container_width=True)
+        st.download_button(
+            label=f"⬇️ Descargar {img_data['nombre']}",
+            data=img_data["bytes"],
+            file_name=img_data["nombre"],
+            mime="image/png",
+            key="dl_img_main",
+        )
 
 st.session_state.setdefault("messages", [])
 for msg in st.session_state["messages"]:
@@ -967,14 +1233,18 @@ for msg in st.session_state["messages"]:
             st.caption("🛠️ Acciones ejecutadas: " + " | ".join(msg["tools"]))
 
 user_input = st.chat_input(
-    "Escribe tu pedido aquí (ej. 'Busca videos de Cálculo, crea un resumen en Docs y agéndalo en Tasks')..."
+    "Escribe tu pedido aquí (ej. 'Analiza el PDF adjunto, crea un Canvas resumen y envíalo por Gmail')..."
 )
 prompt_final = prompt_rapido or user_input
 
 if prompt_final:
-    st.session_state["messages"].append({"role": "user", "content": prompt_final})
+    etiqueta_usuario = prompt_final
+    if nombres_subidos:
+        etiqueta_usuario += f"\n\n📎 *Archivos adjuntos activos: {', '.join(nombres_subidos)}*"
+
+    st.session_state["messages"].append({"role": "user", "content": etiqueta_usuario})
     with st.chat_message("user"):
-        st.markdown(prompt_final)
+        st.markdown(etiqueta_usuario)
 
     with st.chat_message("assistant"):
         with st.spinner("Ejecutando herramientas autónomas..."):
@@ -986,6 +1256,17 @@ if prompt_final:
                 )
                 for m in st.session_state["messages"][:-1]
             ]
+
+            # Construir partes del mensaje actual (texto + documentos extraídos + imágenes)
+            partes_mensaje = [types.Part.from_text(text=prompt_final)]
+            if contexto_documentos_subidos:
+                partes_mensaje.append(
+                    types.Part.from_text(
+                        text="\n\n".join(contexto_documentos_subidos)
+                    )
+                )
+            partes_mensaje.extend(imagenes_subidas_parts)
+
             texto_respuesta = None
             errores = []
 
@@ -1009,7 +1290,7 @@ if prompt_final:
                                     ),
                                 ),
                             )
-                            response = chat.send_message(prompt_final)
+                            response = chat.send_message(partes_mensaje)
                             texto_respuesta = response.text or "Acción completada."
                             break
                         except Exception as e:
