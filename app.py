@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import socket
 
@@ -97,6 +98,58 @@ def registrar_archivo_generado(nombre: str, data_bytes: bytes, mime: str = "appl
     st.session_state.setdefault("archivos_generados", []).append(item)
 
 
+def reproducir_voz_respuesta(texto_markdown: str, activar_auto: bool = True) -> None:
+    """Renderiza un reproductor de voz en español en el navegador para la respuesta del agente."""
+    limpio = re.sub(r"https?://\S+", "enlace adjunto en pantalla", texto_markdown)
+    limpio = re.sub(r"[#*`_>|]", " ", limpio)
+    limpio = re.sub(r"\s+", " ", limpio).strip()[:1400]
+    if not limpio:
+        return
+    texto_js = json.dumps(limpio)
+    auto_js = "true" if activar_auto else "false"
+    components.html(
+        f"""
+        <div style="display:flex;align-items:center;gap:8px;font-family:system-ui,sans-serif;">
+          <button id="btn-play" onclick="hablar()" style="background:#FF6B00;color:#fff;border:none;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px;font-weight:600;">
+            🔊 Escuchar respuesta
+          </button>
+          <button onclick="detener()" style="background:#334155;color:#fff;border:none;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:13px;">
+            ⏹️ Detener
+          </button>
+          <span id="estado-voz" style="font-size:12px;color:#64748B;"></span>
+        </div>
+        <script>
+          const texto = {texto_js};
+          const auto = {auto_js};
+          function hablar() {{
+            if (!('speechSynthesis' in window)) {{
+              document.getElementById('estado-voz').innerText = 'Navegador sin síntesis de voz';
+              return;
+            }}
+            window.speechSynthesis.cancel();
+            const u = new SpeechSynthesisUtterance(texto);
+            u.lang = 'es-PE';
+            u.rate = 1.04;
+            const voces = window.speechSynthesis.getVoices();
+            const vozEs = voces.find(v => v.lang.startsWith('es'));
+            if (vozEs) u.voice = vozEs;
+            u.onstart = () => document.getElementById('estado-voz').innerText = 'Hablando...';
+            u.onend = () => document.getElementById('estado-voz').innerText = '';
+            window.speechSynthesis.speak(u);
+          }}
+          function detener() {{
+            if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+            document.getElementById('estado-voz').innerText = '';
+          }}
+          if (auto) {{
+            setTimeout(hablar, 250);
+          }}
+        </script>
+        """,
+        height=44,
+    )
+
+
 def get_system_instruction() -> str:
     ahora_lima = datetime.datetime.now(ZoneInfo("America/Lima")).strftime(
         "%Y-%m-%d %H:%M (%A)"
@@ -106,7 +159,7 @@ def get_system_instruction() -> str:
     resumen_adj = ", ".join(adjuntos) if adjuntos else "Ninguno"
     return f"""
 Eres el Agente IA Autónomo de la Universidad de Lima enfocado en el ODS 4 (Educación de Calidad).
-Ayudas a estudiantes, docentes y postulantes a investigar, estudiar, analizar documentos/imágenes, construir aplicaciones interactivas (Canvas) y automatizar tareas reales.
+Ayudas a estudiantes, docentes y postulantes a investigar, estudiar, conversar por voz, analizar documentos/imágenes, construir aplicaciones interactivas (Canvas) y automatizar tareas reales.
 Usuario conectado actualmente: {usuario}.
 Archivos/imágenes adjuntados por el usuario en sesión: {resumen_adj}.
 
@@ -127,6 +180,7 @@ Conocimiento base ULima (14 carreras de pregrado):
 14. Psicología
 
 Reglas estrictas de ejecución:
+- Si el usuario envía un mensaje de voz (audio), comprende su pedido hablado con naturalidad, ejecuta las herramientas necesarias y responde de forma clara, directa y conversacional.
 - Ejecuta las herramientas disponibles de forma autónoma y encadenada cuando el usuario pida varias acciones en un mismo mensaje.
 - JAMÁS afirmes que enviaste un correo, creaste un archivo, agendaste un evento o creaste una tarea/encuesta/canvas si la herramienta no devolvió una confirmación explícita ('ENVIADO_OK', 'ARCHIVO_OK', 'EVENTO_OK', 'TAREA_OK', 'FORM_OK', 'CANVAS_OK', 'IMAGEN_OK') o si devolvió 'ERROR:'. Si hay un error, explica el motivo exacto al usuario.
 - Cuando el usuario pida crear una app interactiva, simulador, calculadora, mapa mental visual, diagrama o página web (Canvas), llama a `crear_canvas_interactivo` entregando código HTML5 + CSS + JS autocontenido y funcional.
@@ -1025,7 +1079,7 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
         st.markdown("## 🎓 Agente IA — Universidad de Lima")
         st.write(
             "Conecta tu cuenta de Google para darle acceso aislado a tu **Gmail, Calendar, "
-            "Google Drive, Docs, Slides, Sheets, YouTube, Tasks, Contactos, Forms, Maps y Canvas**."
+            "Google Drive, Docs, Slides, Sheets, YouTube, Tasks, Contactos, Forms, Maps, Canvas y Chat de Voz**."
         )
         st.info(
             "💡 **Importante:** En la pantalla de permisos de Google, marca **"
@@ -1046,7 +1100,7 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
             st.error(f"Revisa tus Secrets de OAuth en Streamlit: {e}")
 
         if st.button(
-            "⚡ Entrar ahora en Modo Rápido (Canvas + Adjuntos + Web + Office + YouTube)",
+            "⚡ Entrar ahora en Modo Rápido (Voz + Canvas + Adjuntos + Web + Office)",
             use_container_width=True,
         ):
             st.session_state["modo_rapido"] = True
@@ -1055,7 +1109,7 @@ if "google_creds" not in st.session_state and not st.session_state.get("modo_rap
 
 
 # ==============================================================================
-# 5. INTERFAZ PRINCIPAL, ADJUNTOS, VERIFICADOR DE PERMISOS Y BARRA LATERAL
+# 5. INTERFAZ PRINCIPAL, VOZ, ADJUNTOS, PERMISOS Y BARRA LATERAL
 # ==============================================================================
 creds_actuales = get_user_credentials()
 permisos_faltantes = []
@@ -1075,6 +1129,9 @@ with st.sidebar:
             st.caption("✅ Todos los permisos Workspace activos")
     else:
         st.info("⚡ Modo Rápido (Sin cuenta Google)")
+
+    st.divider()
+    voz_automatica = st.toggle("🔊 Responder también con voz", value=True)
 
     st.divider()
     st.markdown("**📎 Adjuntar archivos o imágenes:**")
@@ -1103,7 +1160,6 @@ with st.sidebar:
                 contexto_documentos_subidos.append(
                     f"=== CONTENIDO DEL ARCHIVO ADJUNTO '{f.name}' ===\n{texto_doc}"
                 )
-        # Guarda el último archivo subido como disponible para reenviar por Gmail
         ultimo_subido = archivos_subidos[-1]
         st.session_state["ultimo_archivo"] = {
             "nombre": ultimo_subido.name,
@@ -1113,9 +1169,10 @@ with st.sidebar:
     st.session_state["archivos_subidos_info"] = nombres_subidos
 
     st.divider()
-    st.markdown("**Herramientas del Agente (15):**")
+    st.markdown("**Herramientas del Agente (16):**")
     st.markdown(
         """
+- 🎙️ Chat de Voz Bidireccional (Escucha y Habla)
 - 🎨 Canvas Interactivo (Apps/Web/Diagramas)
 - 🖼️ Generador de Imágenes y Gráficos
 - 📎 Análisis de PDF, Office e Imágenes
@@ -1154,10 +1211,19 @@ with st.sidebar:
         st.session_state["messages"] = []
         st.session_state.pop("canvas_activo", None)
         st.session_state.pop("ultima_imagen", None)
+        st.session_state.pop("ultimo_audio_hash", None)
         st.rerun()
 
     if st.button("🚪 Cerrar sesión", use_container_width=True):
-        for k in ["google_creds", "user_email", "modo_rapido", "messages", "canvas_activo", "ultima_imagen"]:
+        for k in [
+            "google_creds",
+            "user_email",
+            "modo_rapido",
+            "messages",
+            "canvas_activo",
+            "ultima_imagen",
+            "ultimo_audio_hash",
+        ]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -1184,7 +1250,7 @@ if permisos_faltantes:
 
 st.markdown("## ✨ ¿Qué quieres que haga hoy por ti?")
 st.write(
-    "Adjunta documentos o imágenes en la barra lateral, pídeme que revise tu **Google Drive**, "
+    "Háblame por **micrófono**, escribe tu pedido, adjunta documentos o imágenes, pídeme que revise tu **Google Drive**, "
     "cree un **Canvas interactivo**, genere **gráficos/imágenes**, agende en **Calendar** o envíe **Gmails**."
 )
 
@@ -1226,28 +1292,53 @@ if st.session_state.get("ultima_imagen"):
         )
 
 st.session_state.setdefault("messages", [])
-for msg in st.session_state["messages"]:
+total_msgs = len(st.session_state["messages"])
+for idx_m, msg in enumerate(st.session_state["messages"]):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("tools"):
             st.caption("🛠️ Acciones ejecutadas: " + " | ".join(msg["tools"]))
+        if msg["role"] == "assistant":
+            es_ultimo = idx_m == total_msgs - 1
+            reproducir_voz_respuesta(
+                msg["content"], activar_auto=(es_ultimo and voz_automatica)
+            )
 
+# Entrada por voz (micrófono) + entrada por texto
+audio_grabado = st.audio_input("🎙️ Habla con el agente (pulsa para grabar y detener):")
 user_input = st.chat_input(
-    "Escribe tu pedido aquí (ej. 'Analiza el PDF adjunto, crea un Canvas resumen y envíalo por Gmail')..."
+    "O escribe tu pedido aquí (ej. 'Analiza el PDF adjunto, crea un Canvas resumen y envíalo por Gmail')..."
 )
+
+audio_bytes_nuevos = None
+if audio_grabado is not None:
+    raw_audio = audio_grabado.getvalue()
+    audio_hash = hash(raw_audio)
+    if audio_hash != st.session_state.get("ultimo_audio_hash"):
+        st.session_state["ultimo_audio_hash"] = audio_hash
+        audio_bytes_nuevos = raw_audio
+
 prompt_final = prompt_rapido or user_input
 
-if prompt_final:
-    etiqueta_usuario = prompt_final
+if prompt_final or audio_bytes_nuevos:
+    if audio_bytes_nuevos and not prompt_final:
+        etiqueta_usuario = "🎙️ *[Mensaje de voz enviado al agente]*"
+        texto_para_gemini = "Escucha atentamente este audio del usuario y cumple exactamente su solicitud usando las herramientas disponibles si corresponde."
+    else:
+        etiqueta_usuario = prompt_final
+        texto_para_gemini = prompt_final
+
     if nombres_subidos:
         etiqueta_usuario += f"\n\n📎 *Archivos adjuntos activos: {', '.join(nombres_subidos)}*"
 
     st.session_state["messages"].append({"role": "user", "content": etiqueta_usuario})
     with st.chat_message("user"):
         st.markdown(etiqueta_usuario)
+        if audio_bytes_nuevos:
+            st.audio(audio_bytes_nuevos, format="audio/wav")
 
     with st.chat_message("assistant"):
-        with st.spinner("Ejecutando herramientas autónomas..."):
+        with st.spinner("Escuchando y ejecutando herramientas autónomas..."):
             st.session_state["tool_logs"] = []
             historial_gemini = [
                 types.Content(
@@ -1257,8 +1348,11 @@ if prompt_final:
                 for m in st.session_state["messages"][:-1]
             ]
 
-            # Construir partes del mensaje actual (texto + documentos extraídos + imágenes)
-            partes_mensaje = [types.Part.from_text(text=prompt_final)]
+            partes_mensaje = [types.Part.from_text(text=texto_para_gemini)]
+            if audio_bytes_nuevos:
+                partes_mensaje.append(
+                    types.Part.from_bytes(data=audio_bytes_nuevos, mime_type="audio/wav")
+                )
             if contexto_documentos_subidos:
                 partes_mensaje.append(
                     types.Part.from_text(
